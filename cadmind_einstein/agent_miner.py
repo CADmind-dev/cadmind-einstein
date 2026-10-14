@@ -74,7 +74,8 @@ wrong at each step and the requirement/test proving it does not; every critical 
 (`fetch` into the project's assets/), never invented. Fetch only what the first sketch needs, then \
 build.
 2. Iterate with check / build / test; edit files, never rewrite them whole; run the full `test` \
-with mutate once at the end (`watt_wait`).
+with mutate once at the end (`watt_wait`), only after a passing scoped guard (mutate with several \
+`only`, one run) covering every must requirement, never as a first check.
 3. Self-review: load paths, retention, clearances, every clause tested; fix the weakest points.
 Never weaken a test to pass. What only the client can decide is an open decision, designed around \
 your best sourced assumption.

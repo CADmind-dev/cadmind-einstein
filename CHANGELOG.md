@@ -5,6 +5,12 @@ All notable changes to this project are listed here. The format follows
 [Semantic Versioning](https://semver.org/). Each release's spec version (`10000*MAJOR + 100*MINOR + PATCH`) is the
 `version_key` the validator sets weights with.
 
+## [Unreleased]
+
+### Changed
+- The reference miner's prompt runs the full mutation guard only after a passing scoped guard that covers every
+  must requirement, never as a first check.
+
 ## [0.2.0] - 2026-10-14
 
 ### Added
