@@ -193,7 +193,7 @@ the client's device. Details: [`../DESIGN.md`](../DESIGN.md) section 9.
   names the previous report's SHA-256, and the newest hash is committed on chain. Check it yourself:
 
   ```bash
-  cadmind-recompute hour-A.json ... hour-N.json --network "$NETWORK" --netuid "$NETUID" \
+  cadmind-recompute hour-A.json ... hour-N.json --subtensor.network "$NETWORK" --netuid "$NETUID" \
       --validator-hotkey "$VALIDATOR_HOTKEY"
   ```
 
@@ -218,7 +218,8 @@ This repository ships two miners:
 
   ```bash
   pip install -e .                 # from a checkout of this repository
-  cadmind-einstein-miner --wallet-name miner --wallet-hotkey m1 \
+  cadmind-einstein-miner --wallet.name miner --wallet.hotkey m1 \
+      --subtensor.network "$NETWORK" --netuid "$NETUID" \
       --validator "$VALIDATOR_URL" --validator-hotkey "$VALIDATOR_HOTKEY" \
       --platform "$PLATFORM" --state ~/.local/share/cadmind-einstein-miner --model <your model>
   ```
@@ -232,4 +233,13 @@ workspace. Accept **before** starting the agent, and keep polling `work` while i
 The harness is where you compete: planning, reading `watt check` output, recovering from a failed guard and keeping
 compute low all show up in your score.
 
-A systemd user unit for the reference miner is in [`../deploy/cadmind-einstein-miner.service`](../deploy/cadmind-einstein-miner.service).
+The miner takes Bittensor's usual flags (`--wallet.name`, `--wallet.hotkey`, `--wallet.path`, `--subtensor.network`,
+`--netuid`, `--logging.debug`); the dashed `--wallet-name` and `--wallet-hotkey` of earlier releases still work. With
+`--netuid` it checks once at startup that your hotkey is registered.
+
+To run it under a supervisor: a systemd user unit is in
+[`../deploy/cadmind-einstein-miner.service`](../deploy/cadmind-einstein-miner.service), a pm2 file in
+[`../deploy/pm2/ecosystem.config.js`](../deploy/pm2/ecosystem.config.js), and a Docker Compose profile in
+[`../deploy/docker/compose.yml`](../deploy/docker/compose.yml); see the README's "Running and updating" for these and
+the opt-in updater. Hardware needs are small (the CAD work runs on the hosted Watt service): see
+[`../min_compute.yml`](../min_compute.yml).

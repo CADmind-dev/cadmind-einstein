@@ -14,8 +14,8 @@ ExecStart=%h/cadmind-einstein/.venv/bin/cadmind-einstein \
   --operator-key-file %h/.config/cadmind-einstein/operator.key \
   --mint-key-file %h/.config/cadmind-einstein/mint.key \
   --queue-key-file %h/.config/cadmind-einstein/queue.key \
-  --wallet-name VALIDATOR_WALLET --wallet-hotkey VALIDATOR_HOTKEY_NAME \
-  --network test --netuid NETUID \
+  --wallet.name VALIDATOR_WALLET --wallet.hotkey VALIDATOR_HOTKEY_NAME \
+  --subtensor.network test --netuid NETUID \
   --trusted-proxy 127.0.0.1 \
   --dry-run-weights
 Restart=on-failure

@@ -1,0 +1,73 @@
+# Minimum and recommended hardware for CADmind einstein (subnet repository convention).
+#
+# The heavy work -- the CAD toolchain (Watt), builds, tests and the mutation guard -- runs on
+# CADmind's hosted Watt service, not on miners' or validators' machines. A miner's machine runs a
+# small poller and its own agent CLI (the model itself runs at the miner's model provider, or on
+# the miner's own hardware if it chooses a local model -- size that separately). A validator's
+# machine runs the job desk, an HTTP face, a SQLite store and the copy check.
+
+version: "1.0"
+
+compute_spec:
+
+  miner:
+
+    cpu:
+      min_cores: 2
+      recommended_cores: 4
+      architecture: "x86_64 or arm64"
+
+    gpu:
+      required: false            # only if you run your model locally; then size it for your model
+
+    memory:
+      min_ram: 2                 # GB
+      recommended_ram: 4         # GB; an agent CLI (e.g. Node.js-based) can use 1-2 GB on its own
+      ram_type: "any"
+
+    storage:
+      min_space: 5               # GB: the package, its virtualenv and agent logs
+      recommended_space: 20      # GB
+      type: "SSD"
+
+    os:
+      name: "Ubuntu (or any Linux with Python 3.12)"
+      version: "22.04+"
+
+  validator:
+
+    cpu:
+      min_cores: 2
+      recommended_cores: 4
+      architecture: "x86_64 or arm64"
+
+    gpu:
+      required: false
+
+    memory:
+      min_ram: 4                 # GB
+      recommended_ram: 8         # GB
+      ram_type: "any"
+
+    storage:
+      min_space: 20              # GB: SQLite state and the hourly reports, which are kept
+      recommended_space: 50      # GB
+      type: "SSD"
+
+    os:
+      name: "Ubuntu (or any Linux with Python 3.12)"
+      version: "22.04+"
+
+network_spec:
+
+  miner:
+    bandwidth:
+      download: 20               # Mbps
+      upload: 10                 # Mbps
+    inbound: "none: a miner only makes outbound HTTPS calls (validator, platform, model provider)"
+
+  validator:
+    bandwidth:
+      download: 100              # Mbps
+      upload: 100                # Mbps
+    inbound: "HTTPS (443) from miners and the platform, through a TLS reverse proxy; a stable address or domain"
