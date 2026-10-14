@@ -186,4 +186,4 @@ report's hash with the validator's on-chain commitment.
 
 ## License
 
-Apache-2.0; see [`LICENSE`](LICENSE).
+Public domain (the Unlicense); see [`LICENSE`](LICENSE).
