@@ -79,10 +79,15 @@ validator: freeze on submit, fork, read Watt's verdict (the gate), copy check, s
 
 ## 4. The gate, reassignment and how a job ends
 
-- **The gate is Watt's own verdict, read cheaply.** The validator forks the frozen workspace into one only it can
-  write and runs `watt status` there. The output passes when the project is **deliverable**. Nothing is re-run:
-  the digest covers the tests' code and the verification record is written only by Watt, so "deliverable" means
-  the tests passed and the guard was clean on exactly this project.
+- **The gate is Watt's own verdict, on the validator's own draw.** The validator forks the frozen workspace into
+  one only it can write and runs `watt status` there: the project must be **deliverable** (the digest covers the
+  tests' code and the verification record is written only by Watt). Watt's mutation guard samples its mutants in
+  an order seeded by a host secret and the digest, so the miner's record is one draw, and a miner could re-roll it
+  (any change draws anew) until a weak requirement passed. So the validator then runs `watt test --mutate` on its
+  fork (the operator's lane, whose draw the bench keys apart from the miners'; the fork's guard outcomes and build
+  are reused) and reads `watt status` again: the output passes only when that run passed and the record is that
+  run's draw (`guard_draw.seed`). A miner whose own record is not deliverable fails at the first `status`, at no
+  guard cost.
 - **Any attempt that does not pass** -- a rejection, a gate failure, a timeout (not accepted within 2 minutes, or
   late and failing), a copy -- sends the job to **another miner, from scratch**: the brief (or the seed) only, never
   the failed project, and never an earlier miner's rejection message. Each miner decides on its own.

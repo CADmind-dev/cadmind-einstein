@@ -21,7 +21,7 @@ from typing import Any
 import bittensor.http_auth as btauth
 from bittensor.sp_core import Keypair
 
-from cadmind_einstein.desk import Desk, DeskError
+from cadmind_einstein.desk import GATE_RUN_S, Desk, DeskError
 from cadmind_einstein.platform import PlatformError
 from cadmind_einstein.scoring import (
     HOUR_MS,
@@ -74,6 +74,8 @@ class FakePlatform:
         self.lost: set[str] = set()
         self.completed: dict[str, dict[str, Any]] = {}
         self.suspended: set[str] = set()  # miners Watt's telemetry suspended (platform side)
+        self.runs: list[tuple[str, str]] = []  # (workspace, command) of every watt run
+        self.forks = 0
 
     def claim(self) -> dict[str, Any] | None:
         if not self.queue:
@@ -123,18 +125,46 @@ class FakePlatform:
 
     def fork(self, ws: str) -> str:
         src = self.ws[ws]
+        self.forks += 1
         return self._new(
-            files=dict(src["files"]), deliverable=src["deliverable"], hotkey="validator"
+            files=dict(src["files"]),
+            deliverable=src["deliverable"],
+            weak=src.get("weak", False),
+            draw=src.get("draw", ""),
+            hotkey="validator",
         )
 
     def run(self, ws: str, command: str, args: Any = None, **_: Any) -> dict[str, Any]:
+        """``status``, and ``test --mutate`` as Watt's sampled guard on the operator's lane: a
+        weak design (one only a lucky draw passes) is refused by the validator's draw, which then
+        leaves the miner's record in place; a sound one is recorded with the validator's draw."""
         w = self.ws[ws]
+        self.runs.append((ws, command))
         digest = str(abs(hash(json.dumps(w["files"], sort_keys=True))))
+        if command == "test" and (args or {}).get("mutate"):
+            if w.get("weak"):
+                guard = {
+                    "digest": digest,
+                    "sampled": {"seed": "sha256:validator"},
+                    "survivors": [{"label": "drop hook", "requirements": ["holds"]}],
+                }
+                return {"state": "done", "ok": False, "data": {"guard": guard}}
+            w.update(deliverable=True, draw="sha256:validator")
+            guard = {"digest": digest, "sampled": {"seed": "sha256:validator"}, "survivors": []}
+            return {"state": "done", "ok": True, "data": {"guard": guard}}
         stage = "deliverable" if w["deliverable"] else "check"
+        draw = {"sampled": [3, 9], "seed": w.get("draw") or "sha256:miner"}
         return {
             "state": "done",
             "ok": True,
-            "data": {"status": {"deliverable": w["deliverable"], "stage": stage, "digest": digest}},
+            "data": {
+                "status": {
+                    "deliverable": w["deliverable"],
+                    "stage": stage,
+                    "digest": digest,
+                    "guard_draw": draw if w["deliverable"] else None,
+                }
+            },
         }
 
     def export(self, ws: str) -> bytes:
@@ -145,11 +175,23 @@ class FakePlatform:
 
     # the miner's side, for the tests
     def work(
-        self, ws: str, files: dict[str, str], *, deliverable: bool, compute_ms: int = 60_000
+        self,
+        ws: str,
+        files: dict[str, str],
+        *,
+        deliverable: bool,
+        compute_ms: int = 60_000,
+        weak: bool = False,
     ) -> None:
+        """``deliverable``: the miner's own guard record says so; ``weak``: only because its draw
+        was lucky (a re-rolled draw), so the validator's own draw refuses it."""
         assert not self.ws[ws]["frozen"]
         self.ws[ws].update(
-            files={**self.ws[ws]["files"], **files}, deliverable=deliverable, compute_ms=compute_ms
+            files={**self.ws[ws]["files"], **files},
+            deliverable=deliverable,
+            compute_ms=compute_ms,
+            weak=weak,
+            draw="sha256:miner",
         )
 
 
@@ -607,6 +649,115 @@ class TestDesk(unittest.TestCase):
         with self.assertRaises(DeskError) as e:
             self.desk.agent_key(A, new_keypair()[1])
         self.assertEqual(e.exception.status, 403)
+
+
+class TestGateDraw(unittest.TestCase):
+    """The gate draws its own sample of the mutation guard: a miner's record is one draw it may have
+    re-rolled (any change draws anew) until a weak design passed, so the validator runs
+    ``watt test --mutate`` on its fork (the operator's lane, its own secret draw) and passes only a
+    record that run wrote."""
+
+    setUp = TestDesk.setUp
+    tearDown = TestDesk.tearDown
+    tick = TestDesk.tick
+    enqueue = TestDesk.enqueue
+    poll = TestDesk.poll
+    assigned = TestDesk.assigned
+
+    def submit(self, job: str, *, weak: bool, deliverable: bool = True) -> tuple[str, str]:
+        self.poll(A, B, C)
+        self.enqueue({"job": job, "brief": "A wall hook."})
+        hk, w = self.assigned()
+        self.desk.accept(hk, job)
+        self.p.work(w["workspace"], GOOD, deliverable=deliverable, weak=weak)
+        self.desk.submit(hk, job, w["workspace"], "d")
+        return hk, w["workspace"]
+
+    def gate_runs(self, ws: str) -> list[str]:
+        return [c for w, c in self.p.runs if w != ws]
+
+    def test_a_re_rolled_draw_the_validators_draw_refuses_is_not_accepted(self) -> None:
+        hk, ws = self.submit("r1", weak=True)
+        st = wait_state(self.desk, "r1", ("queued", "done"))
+        self.assertEqual(st["state"], "queued")  # back to another miner, not delivered
+        a = self.desk.jobs["r1"].attempts[0]
+        self.assertEqual((a.hotkey, a.kind), (hk, "gate"))
+        self.assertIn("validator's own mutation guard did not pass", a.outcome)
+        self.assertIn("unguarded R.holds", a.outcome)
+        self.assertNotIn("r1", self.p.completed)
+        self.assertEqual(self.ledger.outcomes, [])  # held, as any gate failure
+        self.assertEqual(self.gate_runs(ws), ["status", "test"])  # the miner's own record said yes
+        self.assertTrue(self.p.ws[ws]["deliverable"])  # ... and the miner's workspace still does
+
+    def test_a_sound_design_passes_on_the_validators_own_draw(self) -> None:
+        hk, ws = self.submit("r2", weak=False)
+        st = wait_state(self.desk, "r2", ("done",))
+        self.assertEqual((st["result"]["label"], st["result"]["hotkey"]), ("delivered", hk))
+        self.assertEqual(self.gate_runs(ws), ["status", "test", "status"])
+        fork = self.desk.jobs["r2"].attempts[0].fork
+        self.assertEqual(st["result"]["workspace"], fork)
+        self.assertEqual(self.p.ws[fork]["draw"], "sha256:validator")  # the record is ours
+        self.assertEqual(self.p.ws[ws]["draw"], "sha256:miner")  # the miner's is untouched
+        self.assertEqual(self.p.forks, 1)
+
+    def test_a_record_the_validators_run_did_not_write_is_refused(self) -> None:
+        real = self.p.run
+
+        def stale(ws: str, command: str, args: Any = None, **kw: Any) -> dict[str, Any]:
+            if command == "test":  # a run that says it passed, but the record is not its draw
+                self.p.runs.append((ws, command))
+                guard = {
+                    "digest": real(ws, "status")["data"]["status"]["digest"],
+                    "sampled": {"seed": "sha256:validator"},
+                }
+                return {"state": "done", "ok": True, "data": {"guard": guard}}
+            return real(ws, command, args, **kw)
+
+        self.p.run = stale  # type: ignore[method-assign]
+        self.submit("r3", weak=False)
+        st = wait_state(self.desk, "r3", ("queued", "done"))
+        self.assertEqual(st["state"], "queued")
+        self.assertEqual(self.desk.jobs["r3"].attempts[0].kind, "gate")
+
+    def test_no_guard_run_when_the_miners_own_record_is_not_deliverable(self) -> None:
+        _, ws = self.submit("r4", weak=False, deliverable=False)
+        wait_state(self.desk, "r4", ("queued", "done"))
+        self.assertEqual(self.gate_runs(ws), ["status"])  # bounded: nothing heavy for a no
+
+    def test_a_guard_run_that_does_not_end_is_retried_on_the_same_fork(self) -> None:
+        real, calls = self.p.run, {"test": 0}
+
+        def slow_once(ws: str, command: str, args: Any = None, **kw: Any) -> dict[str, Any]:
+            if command == "test":
+                calls["test"] += 1
+                self.assertEqual(kw.get("budget_s"), GATE_RUN_S)
+                if calls["test"] == 1:
+                    return {"state": "running", "run": "run-1"}
+            return real(ws, command, args, **kw)
+
+        self.p.run = slow_once  # type: ignore[method-assign]
+        hk, _ = self.submit("r5", weak=False)
+        self.assertTrue(self.desk.wait_idle())
+        self.assertEqual(self.desk.status("r5")["state"], "judging")  # our side: retried
+        self.desk._retry_at.clear()
+        self.tick()
+        st = wait_state(self.desk, "r5", ("done",))
+        self.assertEqual((st["result"]["label"], st["result"]["hotkey"]), ("delivered", hk))
+        self.assertEqual(self.p.forks, 1)  # the same fork, its guard outcomes reused
+
+    def test_a_guard_run_stopped_by_its_wall_clock_limit_does_not_pass(self) -> None:
+        real = self.p.run
+
+        def wall(ws: str, command: str, args: Any = None, **kw: Any) -> dict[str, Any]:
+            if command == "test":
+                return {"state": "done", "ok": False, "stopped": "wall", "data": None}
+            return real(ws, command, args, **kw)
+
+        self.p.run = wall  # type: ignore[method-assign]
+        self.submit("r6", weak=False)
+        st = wait_state(self.desk, "r6", ("queued", "done"))
+        self.assertEqual(st["state"], "queued")
+        self.assertIn("(stopped: wall)", self.desk.jobs["r6"].attempts[0].outcome)
 
 
 class TestService(unittest.TestCase):

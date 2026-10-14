@@ -6,9 +6,10 @@ miners, gates their results through the hosted Watt check, scores them and sets 
 - **What miners do:** build client devices as Watt projects with their own agent (any model, any harness), using
   the hosted CADmind Watt tools over MCP (or REST) with a hotkey-bound agent key.
 - **What the validator does:** claims client jobs from the CADmind platform's queue, gives each to **one** admitted
-  miner, freezes and forks the miner's workspace on submit, reads Watt's verdict there (the gate), checks for
-  copies, scores the job, delivers it (or reassigns it to another miner from scratch), records the client's
-  reaction, and every hour sets weights and publishes an auditable report whose hash is committed on chain.
+  miner, freezes and forks the miner's workspace on submit, gates the fork on Watt's verdict (with its own run of
+  the mutation guard there), checks for copies, scores the job, delivers it (or reassigns it to another miner from
+  scratch), records the client's reaction, and every hour sets weights and publishes an auditable report whose
+  hash is committed on chain.
 
 Everything else -- Watt itself, the agent bench that runs it, the platform's accounts, queue and billing -- is a
 hosted service reached over HTTP. This repository contains no Watt code and needs none.
@@ -137,7 +138,8 @@ your model provider's terms.
 With its operator key: `POST /api/agent/subnet/keys` (mint), `.../keys/disable`, `.../workspaces` (grant),
 `.../workspaces/{ws}` (state), `.../freeze`, `.../fork`; `POST /api/engine/einstein/claim`, `lease`,
 `GET .../claimed`, `POST .../jobs/{job}/result`; and in its own forks the ordinary agent routes
-(`/api/agent/workspaces/{ws}/run` for `watt status`, `/export`). See `cadmind_einstein/platform.py`.
+(`/api/agent/workspaces/{ws}/run` for `watt status` and the gate's `watt test --mutate`, `/export`). See
+`cadmind_einstein/platform.py`.
 
 ## Scoring and weights
 

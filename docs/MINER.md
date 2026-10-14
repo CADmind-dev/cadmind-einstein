@@ -105,9 +105,11 @@ All calls are signed POSTs to `$VALIDATOR_URL`.
 
 ## 5. The gate, reassignment and how a job ends
 
-**The gate is Watt's own verdict.** The validator forks your frozen workspace and reads `watt status` there. You
-pass when the project is **deliverable**: every check passes and the mutation guard is recorded for the current
-digest. Nothing is re-run, so whatever made it deliverable must be in the workspace.
+**The gate is Watt's own verdict.** The validator forks your frozen workspace and reads `watt status` there: the
+project must be **deliverable** (every check passes and the mutation guard is recorded for the current digest). It
+then runs the mutation guard again on its fork, with its own draw of the mutants, and you pass only if that run
+passes too. Your record is one sample of the mutants; a design that passes only a lucky sample fails the gate. Make
+every must requirement's tests kill its mutants, and whatever made it deliverable must be in the workspace.
 
 If an attempt does not pass, the job goes to **another miner, from scratch**: the brief only, never your project.
 

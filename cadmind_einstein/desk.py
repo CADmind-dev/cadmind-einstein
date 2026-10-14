@@ -12,8 +12,11 @@ A job's life:
 3. **working** -- accepted; the deadline is the effort's (low 30, medium 60, high 120, max 180
    minutes).
 4. **judging** -- the miner submitted, or its deadline passed: the workspace is frozen, the
-   validator forks it and reads Watt's verdict there (``watt status``: deliverable, i.e. checks
-   clean and the guard recorded for this digest). That is the gate.
+   validator forks it and gates the fork (:meth:`Desk._gate`): the miner's ``watt status`` must
+   say deliverable, then the validator runs the mutation guard itself (``watt test --mutate`` on
+   its fork, the operator's lane, which draws its own sample), and the guard record ``watt status``
+   then reads must be that run's. A miner's own record is one draw it may have re-rolled until a
+   weak design passed; the validator's draw is one it cannot know.
 5. **done** -- a passing attempt is checked for copying, scored and delivered; the client's
 reaction scores it further.
 
@@ -90,8 +93,33 @@ disabled for abuse while it held the job)"""
 OURS_BUSY = ("run_in_progress", "account_agent_quota", "compute_limit_day")
 """platform refusals of the VALIDATOR's own judging run (its key already running one, or its quota):
 our side, so the judgement is retried, never counted against the miner"""
+GATE_RUN_S = 3600.0
+"""how long the validator waits on its own guard run (``watt test --mutate``) before judging again;
+above the bench's wall-clock limit for a guard run, so Watt ends the run first"""
+
+
+class _GateRetryError(Exception):
+    """The validator's own guard run did not end on its own (still going, an error of the bench,
+    stopped by something other than its limits): our side, so the judgement is retried."""
+
+
 WATCH_PAIRS = 20_000
 """copy comparisons kept for the hourly report (the oldest dropped past it, and counted)"""
+
+
+def _survivors(guard: Any) -> str:
+    """The must requirements a refused guard run names unguarded, for the verdict's words."""
+    if not isinstance(guard, dict):
+        return ""
+    reqs = sorted(
+        {
+            str(r)
+            for s in guard.get("survivors") or []
+            if isinstance(s, dict)
+            for r in s.get("requirements") or []
+        }
+    )
+    return f": unguarded {', '.join('R.' + r for r in reqs)}" if reqs else ""
 
 
 @dataclass(frozen=True)
@@ -124,7 +152,9 @@ class Platform(Protocol):
     def grant(self, hotkey: str, *, brief: str = "", seed: str = "", name: str = "job") -> str: ...
     def freeze(self, ws: str) -> dict[str, Any]: ...
     def fork(self, ws: str) -> str: ...
-    def run(self, ws: str, command: str, args: Any = None) -> dict[str, Any]: ...
+    def run(
+        self, ws: str, command: str, args: Any = None, *, budget_s: float = 1800.0
+    ) -> dict[str, Any]: ...
     def export(self, ws: str) -> bytes: ...
     def claim(self) -> dict[str, Any] | None: ...
     def lease(self, jobs: list[str]) -> dict[str, Any]: ...
@@ -155,6 +185,9 @@ class Attempt:
     category: str = ""
     message: str = ""
     """a rejection's category (not-allowed | not-capable) and the agent's message to the client"""
+    fork: str = ""
+    """the validator's fork being gated, kept across a judgement retried on our side (its guard
+    outcomes and build are reused, and no second fork is made)"""
 
 
 @dataclass
@@ -1325,26 +1358,100 @@ class Desk:
                 self._judging.discard(job.job)
         self._spawn_flush()
 
+    def _status(self, fork: str) -> dict[str, Any]:
+        st = self.platform.run(fork, "status", {})
+        return dict(((st.get("data") or {}).get("status")) or {})
+
+    def _gate(self, fork: str) -> dict[str, Any]:
+        """The Watt gate on the validator's fork of a frozen workspace.
+
+        1. ``watt status``: the miner's own record must say deliverable (its checks clean, a guard
+           recorded for this digest); otherwise the attempt fails here, at no further cost.
+        2. ``watt test --mutate`` on the fork, the validator's own run (the operator's lane: the
+           bench seeds its draw with a key the miners' lane never sees, so the mutants it builds
+           are not the ones the miner's record drew). The fork's guard outcomes and build are
+           reused, so only the mutants the miner's run did not build are built.
+        3. ``watt status`` again: deliverable, the same digest, and the guard record's draw is the
+           one this run reports (``guard_draw.seed``). A guard run that refuses leaves the miner's
+           record in place, so ``deliverable`` alone would still read the miner's draw: the run's
+           own success and its draw are what pass the gate. (A Watt that does not sample names no
+           draw on either side: its guard is the full one, in a fixed order, which no re-roll
+           changes.) The validator's draw of a digest is the same on every run, so a design
+           delivered before and submitted unchanged draws as it did then.
+
+        Raises :class:`_GateRetryError` (and lets :class:`PlatformError` through) on our side.
+        """
+        before = self._status(fork)
+        digest = str(before.get("digest") or "")
+        verdict: dict[str, Any] = {
+            "deliverable": False,
+            "stage": str(before.get("stage") or "none"),
+            "digest": digest,
+        }
+        if not before.get("deliverable"):
+            return verdict
+        run = self.platform.run(fork, "test", {"mutate": True}, budget_s=GATE_RUN_S)
+        state, stopped = run.get("state"), str(run.get("stopped") or "")
+        if state == "running":
+            raise _GateRetryError(f"the validator's guard run {run.get('run', '')} is still going")
+        if state != "done" or stopped in ("cancelled", "frozen"):
+            why = stopped or str(run.get("error") or state)
+            raise _GateRetryError(f"the validator's guard run did not end on its own: {why[:200]}")
+        data = run.get("data")
+        guard = (data.get("guard") if isinstance(data, dict) else None) or {}
+        drawn = (guard.get("sampled") or {}).get("seed") if isinstance(guard, dict) else None
+        if not run.get("ok") or not isinstance(guard, dict) or not guard or guard.get("scope"):
+            limit = stopped or str(run.get("limit") or "")
+            verdict["stage"] = "test"
+            verdict["error"] = (
+                "the validator's own mutation guard did not pass on this design"
+                + (f" (stopped: {limit})" if limit else "")
+                + _survivors(guard)
+            )
+            return verdict
+        after = self._status(fork)
+        draw = after.get("guard_draw") or {}
+        recorded = draw.get("seed") if isinstance(draw, dict) else None
+        if (
+            not after.get("deliverable")
+            or str(after.get("digest") or "") != digest
+            or guard.get("digest") != digest
+            or recorded != drawn
+        ):
+            verdict["error"] = (
+                "the guard record is not the validator's own run "
+                f"(digest {after.get('digest')}, draw {recorded}, the validator's {drawn})"
+            )
+            return verdict
+        return {
+            "deliverable": True,
+            "stage": str(after.get("stage") or "deliverable"),
+            "digest": digest,
+        }
+
     def _judge_once(self, job: Job, a: Attempt) -> None:
-        """Freeze, fork, read ``watt status`` in the fork (the gate), copy-check, score. A platform
-        that is unreachable or answers 5xx leaves the job judging, judged again on a later tick: an
-        outage on our side never fails a miner."""
+        """Freeze, fork, gate the fork (:meth:`_gate`), copy-check, score. A platform that is
+        unreachable or answers 5xx, our own key busy, or our guard run not ending on its own leaves
+        the job judging, judged again on a later tick (on the same fork): an outage on our side
+        never fails a miner."""
         on_time = bool(a.submitted_ms) and a.submitted_ms <= a.deadline_ms
         verdict: dict[str, Any] = {"deliverable": False, "stage": "none", "digest": ""}
-        fork, compute_s, export = "", 0.0, b""
+        fork, compute_s, export = a.fork, 0.0, b""
         try:
             frozen = self.platform.freeze(a.workspace)
             compute_s = int(frozen.get("compute_ms") or 0) / 1000
-            fork = self.platform.fork(a.workspace)
-            st = self.platform.run(fork, "status", {})
-            status = ((st.get("data") or {}).get("status")) or {}
-            verdict = {
-                "deliverable": bool(status.get("deliverable")),
-                "stage": str(status.get("stage") or "none"),
-                "digest": str(status.get("digest") or ""),
-            }
+            if not fork:
+                fork = self.platform.fork(a.workspace)
+                with self._mut():
+                    a.fork = fork
+            verdict = self._gate(fork)
             if verdict["deliverable"]:
                 export = self.platform.export(fork)
+        except _GateRetryError as e:
+            with self._lock:
+                a.outcome = f"judging retried: {str(e)[:200]}"
+                self._retry_at[job.job] = time.monotonic() + 30.0
+            return
         except PlatformError as e:
             busy = e.code in OURS_BUSY
             if e.status == 0 or e.status >= 500 or busy:
@@ -1403,7 +1510,10 @@ class Desk:
                 self._fail(
                     job,
                     a,
-                    "copy" if copy else "did not pass the Watt gate",
+                    "copy"
+                    if copy
+                    else "did not pass the Watt gate"
+                    + (f": {verdict['error']}" if verdict.get("error") else ""),
                     kind=kind,
                     outcome=outcome,
                     fork=fork,

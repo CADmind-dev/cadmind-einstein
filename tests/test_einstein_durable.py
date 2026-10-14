@@ -135,6 +135,32 @@ class TestRestart(unittest.TestCase):
         self.r.tick()
         self.assertEqual(desk.status("m3")["state"], "assigned")
 
+    def test_a_restart_during_the_gates_guard_run_judges_again_on_the_same_fork(self) -> None:
+        self.r.p.queue.append({"job": "m5", "brief": "A wall hook."})
+        self.r.tick()
+        hk, w = self.r.holder("m5")
+        assert self.r.desk is not None
+        self.r.desk.accept(hk, "m5")
+        self.r.p.work(w["workspace"], GOOD, deliverable=True)
+        real = self.r.p.run
+
+        def cut_off(ws: str, command: str, args: Any = None, **kw: Any) -> dict[str, Any]:
+            if command == "test":
+                return {"state": "running", "run": "run-cut"}  # the validator dies waiting
+            return real(ws, command, args, **kw)
+
+        self.r.p.run = cut_off  # type: ignore[method-assign]
+        self.r.desk.submit(hk, "m5", w["workspace"], "d")
+        self.assertTrue(self.r.desk.wait_idle())
+        fork = self.r.desk.jobs["m5"].attempts[-1].fork
+        self.assertTrue(fork)
+        self.r.p.run = real  # type: ignore[method-assign]
+        desk = self.r.restart()
+        self.assertEqual(desk.jobs["m5"].attempts[-1].fork, fork)  # persisted
+        st = wait_state(desk, "m5", ("done",))
+        self.assertEqual((st["result"]["label"], st["result"]["workspace"]), ("delivered", fork))
+        self.assertEqual(self.r.p.forks, 1)
+
     def test_held_failures_telemetry_and_signals_survive(self) -> None:
         self.r.p.queue.append({"job": "m4", "brief": "A wall hook."})
         self.r.tick()
