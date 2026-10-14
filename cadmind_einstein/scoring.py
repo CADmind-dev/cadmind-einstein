@@ -309,6 +309,19 @@ class Ledger:
                     return o.s
         return None
 
+    def withdraw(self, job: str) -> list[JobOutcome]:
+        """Remove every outcome of ``job`` (a delivery the platform refused: nobody is scored on
+        it); answers what was removed."""
+        with self._lock:
+            keys = [k for k, o in self.jobs.items() if o.job == job]
+            gone = [self.jobs.pop(k) for k in keys]
+            for k in keys:
+                if self.store is not None:
+                    self.store.delete("outcome", k)
+            if gone:
+                score_all(self._window(max(o.ended_ms for o in gone)))
+            return gone
+
     def _window(self, now_ms: int) -> list[JobOutcome]:
         return [o for o in self.jobs.values() if now_ms - o.ended_ms <= WINDOW_H * HOUR_MS]
 

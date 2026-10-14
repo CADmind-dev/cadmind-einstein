@@ -263,7 +263,9 @@ class OperatorClient:
         )
 
     def grant(self, hotkey: str, *, brief: str = "", seed: str = "", name: str = "job") -> str:
-        body: dict[str, Any] = {"hotkey": hotkey, "name": name}
+        # ``job`` names the job the workspace is for: the platform's provenance check on a charging
+        # result follows the delivered workspace back to this grant.
+        body: dict[str, Any] = {"hotkey": hotkey, "name": name, "job": name}
         body.update({"seed": seed} if seed else {"brief": brief})
         return str(
             self._call("POST", "/api/agent/subnet/workspaces", body, timeout=320)["workspace"]
@@ -311,7 +313,11 @@ class OperatorClient:
 
     def complete(self, job: str, result: Mapping[str, Any]) -> None:
         """A job's end: delivered (charged once) or declined / out of reach / didn't finish
-        (not)."""
+        (not). A delivered result names the validator's fork (``workspace``) and the digest its
+        gate read (``digest``); the platform refuses it, 409 ``delivery_not_of_job`` or
+        ``delivery_digest_mismatch``, when the fork does not descend from the job's own grant or
+        is not at that digest (never retried), and answers 503 ``delivery_unverified`` when it
+        cannot tell now (retried)."""
         self._call(
             "POST",
             f"/api/engine/einstein/jobs/{quote(job, safe='')}/result",

@@ -359,7 +359,8 @@ def main(argv: list[str] | None = None) -> int:
             + f", {sum(1 for p in pairs if p.get('copy'))} copies; "
             f"admitted per coldkey {[len(v) for v in watch['admitted_by_coldkey'].values()]}; "
             f"{len(watch['same_coldkey_endings'])} declined/out-of-reach ending(s) by one coldkey; "
-            f"{len(watch['disabled'])} disable(s)"
+            f"{len(watch['disabled'])} disable(s); "
+            f"{len(watch['delivery_refusals'])} delivery refusal(s)"
         )
         if rep["vector"]:
             weights.submit(rep["vector"], hour=rep["hour"])

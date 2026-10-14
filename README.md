@@ -163,6 +163,12 @@ ordinary agent routes (`/api/agent/workspaces/{ws}/run` for `watt status` and th
   against a miner.
 - 429 `too_many_in_flight` and 503 hold the role for the answer's `Retry-After`; the calls are retried on a later
   tick.
+- Every grant names its job, and every delivered result names the validator's own fork and the digest its gate
+  read, so the platform can check that a charged delivery descends from the job's own grant at that digest. A
+  result the platform refuses on provenance (409 `delivery_not_of_job` or `delivery_digest_mismatch`) is logged as
+  an ALERT and never sent again; the job is held for review, its scores are withdrawn (the fork is the
+  validator's own, so this is never the miner's fault, and a delivery that did not happen earns nothing), and it
+  is listed in the hourly report's `watch.delivery_refusals`. 503 `delivery_unverified` is sent again later.
 
 ## Scoring and weights
 

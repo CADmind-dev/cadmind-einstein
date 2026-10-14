@@ -100,6 +100,11 @@ SUBSTANTIVE = ("reject", "gate")
 UNCOUNTED = ("dereg", "disabled")
 """attempt kinds that do not count toward a job's attempt cap (the miner left the subnet, or was
 disabled for abuse while it held the job)"""
+REFUSED_DELIVERY = ("delivery_not_of_job", "delivery_digest_mismatch")
+"""the platform's refusals of a delivered result whose provenance it cannot accept (the workspace
+does not descend from the job's own grant, or is not at the digest the validator gated): a
+security ALERT, never sent again, and the job's scores withdrawn -- the validator's side, not the
+miner's (see :meth:`Desk._refused_delivery`)"""
 OURS_BUSY = ("run_in_progress", "account_agent_quota", "compute_limit_day")
 """platform refusals of the VALIDATOR's own judging run (its key already running one, or its quota):
 our side, so the judgement is retried, never counted against the miner"""
@@ -332,6 +337,8 @@ class Desk:
         """per hotkey, the counts its last strike was taken at (each count acts once)"""
         self.disabled_log: list[dict[str, Any]] = []
         """disables since the last hourly report"""
+        self.delivery_refusals: list[dict[str, Any]] = []
+        """delivered results the platform refused on provenance, since the last hourly report"""
         self.watch_pairs: list[dict[str, Any]] = []
         """copy comparisons since the last hourly report (observability: threshold calibration)"""
         self.watch_dropped = 0
@@ -393,6 +400,7 @@ class Desk:
                 "strikes": self.strikes,
                 "abuse_seen": self.abuse_seen,
                 "disabled_log": self.disabled_log,
+                "delivery_refusals": self.delivery_refusals,
             },
         )
         yield "meta", "watch", {"pairs": self.watch_pairs, "dropped": self.watch_dropped}
@@ -440,6 +448,7 @@ class Desk:
         self.strikes = dict(meta.get("strikes") or {})
         self.abuse_seen = {k: dict(v) for k, v in (meta.get("abuse_seen") or {}).items()}
         self.disabled_log = list(meta.get("disabled_log") or [])
+        self.delivery_refusals = list(meta.get("delivery_refusals") or [])
         watch = self.store.get("meta", "watch") or {}
         self.watch_pairs = list(watch.get("pairs") or [])
         self.watch_dropped = int(watch.get("dropped") or 0)
@@ -904,7 +913,9 @@ class Desk:
           rejections, gate failures, copies and delivered jobs (the per-owner rejection rule);
         - ``admitted_by_coldkey``: the admitted hotkeys per coldkey, and ``proven``: the hotkeys
           with a delivered client job (genesis weights);
-        - ``disabled``: the disables since the last report.
+        - ``disabled``: the disables since the last report;
+        - ``delivery_refusals``: delivered results the platform refused on provenance since the
+          last report (a security ALERT each; their jobs' scores withdrawn).
 
         A hotkey with no known coldkey is grouped as ``unknown:<hotkey>``."""
 
@@ -959,6 +970,7 @@ class Desk:
                 "proven": sorted(h for h, n in self.delivered.items() if n > 0),
                 "admitted_by_coldkey": {k: sorted(v) for k, v in sorted(admitted.items())},
                 "disabled": list(self.disabled_log),
+                "delivery_refusals": list(self.delivery_refusals),
             }
 
     def clear_watch(self, pairs: int) -> None:
@@ -968,6 +980,7 @@ class Desk:
             del self.watch_pairs[: max(0, pairs)]
             self.watch_dropped = 0
             self.disabled_log.clear()
+            self.delivery_refusals.clear()
 
     # -- jobs --------------------------------------------------------------------------------------
 
@@ -1320,7 +1333,9 @@ class Desk:
             self._leased_ms = now
             with self._lock:
                 open_jobs = [
-                    j.job for j in self.jobs.values() if j.kind == "client" and j.state != "done"
+                    j.job
+                    for j in self.jobs.values()
+                    if j.kind == "client" and (j.state != "done" or self._held_for_review(j))
                 ]
             if not open_jobs:
                 return
@@ -1329,6 +1344,11 @@ class Desk:
             except PlatformError:
                 return
             for job_id in out.get("lost") or []:
+                job = self.jobs.get(str(job_id))
+                if job is not None and self._held_for_review(job):
+                    with self._mut():  # the platform let it go (cancelled, re-queued): stop leasing
+                        job.result = {**job.result, "released": True}
+                    continue
                 with contextlib.suppress(DeskError):
                     self.cancel(str(job_id))
         finally:
@@ -1367,13 +1387,69 @@ class Desk:
                 if result is not None:
                     try:
                         self.platform.complete(job_id, result)
-                    except PlatformError:
-                        continue
+                    except PlatformError as e:
+                        if e.code in REFUSED_DELIVERY:
+                            self._refused_delivery(job_id, e)
+                        continue  # anything else: sent again on a later tick
                 with self._mut():
                     if job_id in self._outbox:
                         self._outbox.remove(job_id)
         finally:
             self._flushing.release()
+
+    @staticmethod
+    def _held_for_review(job: Job) -> bool:
+        """A job whose delivery the platform refused: still claimed there, so still leased."""
+        return job.result.get("label") == "delivery refused" and not job.result.get("released")
+
+    def _refused_delivery(self, job_id: str, e: PlatformError) -> None:
+        """The platform refused a delivered result on provenance (409 ``delivery_not_of_job`` or
+        ``delivery_digest_mismatch``): nothing was kept or charged and the job stays claimed for
+        review. A security ALERT; the result is never sent again (the same bytes would be refused
+        again).
+
+        **Whose failure.** The validator's (or the platform's), never the miner's: the result names
+        the validator's own fork, made from the miner's workspace AFTER it was frozen, which only
+        the validator's key can write, and its digest is the one the validator's gate read on that
+        fork. A miner can neither substitute the workspace (``submit`` takes only its own granted
+        one) nor move the fork's digest. So the job's scores are withdrawn -- the pass is not
+        rewarded for a delivery that did not happen, and the held failures it turned into zeros
+        are not counted either -- and nobody is penalised. The job keeps its lease (the platform
+        holds it claimed) until the platform drops it or the client cancels."""
+        with self._mut():
+            job = self.jobs.get(job_id)
+            if job is None:
+                return
+            if job_id in self._outbox:
+                self._outbox.remove(job_id)
+            gone = self.ledger.withdraw(job_id)
+            for o in gone:
+                if o.kind == "pass" and self.delivered.get(o.hotkey, 0) > 0:
+                    self.delivered[o.hotkey] -= 1
+                if o.kind == "reject" and self.overturned.get(o.hotkey, 0) > 0:
+                    self.overturned[o.hotkey] -= 1
+            row = {
+                "job": job_id,
+                "code": e.code,
+                "error": str(e)[:300],
+                "hotkey": str(job.result.get("hotkey") or ""),
+                "workspace": str(job.result.get("workspace") or ""),
+                "digest": str(job.result.get("digest") or ""),
+                "withdrawn": len(gone),
+                "at_ms": self.now_ms(),
+            }
+            job.result = {
+                **job.result,
+                "label": "delivery refused",
+                "charge": False,
+                "refused": row,
+            }
+            self.delivery_refusals.append(row)
+            del self.delivery_refusals[:-500]
+        self.log(
+            f"ALERT: the platform refused job {job_id}'s delivery ({e.code}: {e}); not sent again, "
+            f"its scores withdrawn, the job held for review"
+        )
 
     def _assign(self, job: Job, m: Miner) -> None:
         try:
