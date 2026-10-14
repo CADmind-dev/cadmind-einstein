@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "cadmind-einstein"
-version = "0.1.0"
+dynamic = ["version"]
 description = "CADmind einstein on Bittensor: the validator (job desk, Watt gate, scoring, weights) and reference miners"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -30,6 +30,9 @@ cadmind-einstein = "cadmind_einstein.daemon:main"
 cadmind-recompute = "cadmind_einstein.scoring:main"
 cadmind-einstein-miner = "cadmind_einstein.agent_miner:main"
 cadmind-einstein-fake-miner = "cadmind_einstein.fake_miner:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "cadmind_einstein.__version__" }
 
 [tool.setuptools.packages.find]
 include = ["cadmind_einstein", "cadmind_einstein.*"]

@@ -1,0 +1,10 @@
+# Opt-in auto-update (systemctl --user): installs a newer tagged release and restarts the validator.
+# Enable the timer only if you want automatic updates:
+#   systemctl --user enable --now cadmind-einstein-update.timer
+# For a miner, change the restart command to the miner's unit.
+[Unit]
+Description=CADmind einstein: install a newer tagged release, if any
+
+[Service]
+Type=oneshot
+ExecStart=%h/cadmind-einstein/scripts/auto_update.sh --restart "systemctl --user restart cadmind-einstein"

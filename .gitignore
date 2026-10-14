@@ -11,3 +11,4 @@ dist/
 state/
 *.key
 *.token
+deploy/docker/.env

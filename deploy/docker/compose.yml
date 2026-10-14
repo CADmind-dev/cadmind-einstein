@@ -1,0 +1,73 @@
+# CADmind einstein under Docker Compose: a validator and/or a reference miner from one image.
+#
+#   cp deploy/docker/example.env deploy/docker/.env    # then fill it in
+#   docker compose -f deploy/docker/compose.yml --profile validator up -d --build
+#   docker compose -f deploy/docker/compose.yml --profile miner up -d --build
+#
+# The containers run as EINSTEIN_UID:EINSTEIN_GID (set them to `id -u` / `id -g` of the user that
+# owns the mounted wallet, key and state files, which stay mode 0600/0700 on the host).
+
+x-common: &common
+  build:
+    context: ../..
+    args:
+      AGENT_INSTALL: ${AGENT_INSTALL:-}
+  image: cadmind-einstein:${EINSTEIN_TAG:-local}
+  user: "${EINSTEIN_UID:?set EINSTEIN_UID}:${EINSTEIN_GID:?set EINSTEIN_GID}"
+  restart: unless-stopped
+  environment:
+    HOME: /state
+  logging:
+    driver: json-file
+    options: { max-size: "20m", max-file: "5" }
+
+services:
+  validator:
+    <<: *common
+    profiles: [validator]
+    # Host networking: the HTTP face stays on 127.0.0.1:8793 behind the host's TLS proxy
+    # (deploy/nginx-einstein.conf), exactly as with systemd, and --trusted-proxy 127.0.0.1 holds.
+    network_mode: host
+    volumes:
+      - ${WALLETS_DIR:?set WALLETS_DIR}:/wallets:ro
+      - ${VALIDATOR_SECRETS_DIR:?set VALIDATOR_SECRETS_DIR}:/secrets:ro
+      - ${VALIDATOR_STATE_DIR:?set VALIDATOR_STATE_DIR}:/state
+    command:
+      - cadmind-einstein
+      - --state-dir=/state
+      - --host=127.0.0.1
+      - --port=8793
+      - --token-file=/secrets/desk.token
+      - --platform=${PLATFORM_URL:-https://cadmind.ai}
+      - --operator-key-file=/secrets/operator.key
+      - --mint-key-file=/secrets/mint.key
+      - --queue-key-file=/secrets/queue.key
+      - --wallet.path=/wallets
+      - --wallet.name=${VALIDATOR_WALLET:?set VALIDATOR_WALLET}
+      - --wallet.hotkey=${VALIDATOR_HOTKEY:?set VALIDATOR_HOTKEY}
+      - --subtensor.network=${NETWORK:-test}
+      - --netuid=${NETUID:?set NETUID}
+      - --trusted-proxy=127.0.0.1
+      # remove to set weights and commit reports on chain
+      - --dry-run-weights
+
+  miner:
+    <<: *common
+    profiles: [miner]
+    volumes:
+      - ${WALLETS_DIR:?set WALLETS_DIR}:/wallets:ro
+      - ${MINER_STATE_DIR:?set MINER_STATE_DIR}:/state
+      # your agent CLI's own configuration and credentials, if it keeps them in files, e.g.
+      # - ${AGENT_CONFIG_DIR}:/state/.agent-cli
+    command:
+      - cadmind-einstein-miner
+      - --wallet.path=/wallets
+      - --wallet.name=${MINER_WALLET:?set MINER_WALLET}
+      - --wallet.hotkey=${MINER_HOTKEY:?set MINER_HOTKEY}
+      - --subtensor.network=${NETWORK:-test}
+      - --netuid=${NETUID:?set NETUID}
+      - --validator=${VALIDATOR_URL:?set VALIDATOR_URL}
+      - --validator-hotkey=${VALIDATOR_SS58:?set VALIDATOR_SS58}
+      - --platform=${PLATFORM_URL:-https://cadmind.ai}
+      - --state=/state/miner
+      - --agent-cli=${AGENT_CLI:-claude}
