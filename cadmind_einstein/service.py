@@ -188,7 +188,8 @@ class Server(ThreadingHTTPServer):
         max_per_ip: int = MAX_PER_IP,
         trusted_proxies: Iterable[str] = (),
     ) -> None:
-        super().__init__(addr, handler)
+        # Set before binding: a failed bind (the port is taken) calls `server_close`, which reads
+        # `_closed`, and must surface the real OSError, not an AttributeError.
         self.max_connections, self.max_per_ip = max_connections, max_per_ip
         self.trusted_proxies = frozenset(trusted_proxies)
         self._conn_lock = threading.Lock()
@@ -198,6 +199,7 @@ class Server(ThreadingHTTPServer):
         self.refused = 0
         """connections answered 503 because a cap was reached"""
         self._closed = threading.Event()
+        super().__init__(addr, handler)
         threading.Thread(target=self._watch, name="einstein-watchdog", daemon=True).start()
 
     def process_request(self, request: Any, client_address: Any) -> None:

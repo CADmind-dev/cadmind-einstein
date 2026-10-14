@@ -644,3 +644,22 @@ class TestColdkeys(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_a_taken_port_raises_the_bind_error() -> None:
+    """A port in use surfaces as OSError, not an AttributeError from server_close."""
+    import http.server
+    import socket
+
+    import pytest
+
+    from cadmind_einstein.service import Server
+
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    s.listen(1)
+    try:
+        with pytest.raises(OSError):
+            Server(("127.0.0.1", s.getsockname()[1]), http.server.BaseHTTPRequestHandler)
+    finally:
+        s.close()
