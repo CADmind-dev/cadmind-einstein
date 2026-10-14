@@ -29,10 +29,20 @@ another miner passes the same job -- the desk decides that). A **passing** job s
 (a 7-day window). A miner's **weight** is the decayed SUM of its job scores (work done and how
 good); its **quality**, for the router, is the decayed MEAN. The vector is proportional to the
 weight over registered, admitted miners seen in the last 24 hours. An hour with no work or no
-success still emits, from that history. Only when no admitted miner has any history (genesis) is
-the weight split equally among admitted miners that are registered and reachable. **The subnet
-owner's hotkey is never weighted**: weighting it burns miner emission. Nothing is emitted only
-when no miner is admitted at all.
+success still emits, from that history. **Genesis** -- no admitted miner has any history in the
+window -- follows ``genesis``:
+
+- ``delivered`` (the default): equal per COLDKEY among admitted, registered, reachable miners that
+  have delivered at least one scored client job (ever), each coldkey's share split among its
+  hotkeys. Admission alone (a cheap, unscored entry test) earns nothing, so hotkeys registered to
+  farm genesis get no weight; before the first delivery nothing is weighted.
+- ``coldkey``: equal per coldkey among admitted, registered, reachable miners (hotkeys of one owner
+  share one share).
+- ``hotkey``: equal per hotkey among them (an earlier rule; a report without ``genesis`` was made
+  by it).
+
+**The subnet owner's hotkey is never weighted**: weighting it burns miner emission. Nothing is
+emitted when no miner qualifies.
 
 Every hour a report holds the window's jobs with their facts and signals, and the vector;
 :func:`recompute` rebuilds the scores and the vector from a report alone (``python -m
@@ -168,6 +178,9 @@ def standing(jobs: Iterable[JobOutcome], now_ms: int) -> tuple[dict[str, float],
     return dict(total), quality
 
 
+GENESIS = ("delivered", "coldkey", "hotkey")
+
+
 def vector(
     weight: Mapping[str, float],
     uid_by_hotkey: Mapping[str, int],
@@ -175,8 +188,15 @@ def vector(
     owner_hotkey: str,
     admitted: Iterable[str],
     reachable: Iterable[str],
+    genesis: str = "delivered",
+    coldkeys: Mapping[str, str] | None = None,
+    proven: Iterable[str] = (),
 ) -> tuple[list[tuple[int, int]], str]:
-    """The weights and the rule that made them. Never the subnet owner's hotkey; never burned."""
+    """The weights and the rule that made them. Never the subnet owner's hotkey; never burned.
+    ``coldkeys`` (hotkey -> coldkey; a hotkey with none stands alone) and ``proven`` (hotkeys with
+    a delivered client job) serve the genesis rule only."""
+    if genesis not in GENESIS:
+        raise ValueError(f"genesis is one of {GENESIS}")
     adm = {h for h in admitted if h in uid_by_hotkey and h != owner_hotkey}
     live = adm & set(reachable)
 
@@ -187,13 +207,23 @@ def vector(
     earned = {h: v for h, v in weight.items() if v > 0 and h in live}
     if earned:
         return scaled(earned), "history"
-    if live:
+    if genesis == "hotkey" and live:
         return sorted(
             (uid_by_hotkey[h], 65_535) for h in live
         ), "genesis: equal among admitted, reachable miners"
+    pool = live & set(proven) if genesis == "delivered" else live
+    if pool:
+        owner_of = {h: str((coldkeys or {}).get(h) or "") or f"hotkey:{h}" for h in pool}
+        per = {ck: sum(1 for x in owner_of.values() if x == ck) for ck in owner_of.values()}
+        what = "delivered miners" if genesis == "delivered" else "admitted, reachable miners"
+        return sorted(
+            (uid_by_hotkey[h], max(1, round(65_535 / per[owner_of[h]]))) for h in pool
+        ), f"genesis: equal per coldkey among {what}"
     earned = {h: v for h, v in weight.items() if v > 0 and h in adm}
     if earned:
         return scaled(earned), "history (no admitted miner reachable)"
+    if genesis == "delivered" and live:
+        return [], "genesis: no admitted miner has delivered a client job yet: nothing to weight"
     return [], "no admitted miner: nothing to weight"
 
 
@@ -315,15 +345,29 @@ class Ledger:
         reachable: Iterable[str],
         chain: Mapping[str, Any] | None = None,
         watch: Mapping[str, Any] | None = None,
+        genesis: str = "delivered",
+        coldkeys: Mapping[str, str] | None = None,
+        proven: Iterable[str] = (),
     ) -> dict[str, Any]:
         """The hour's report, written as its canonical bytes (``hour-N.json``) beside its SHA-256
         (``hour-N.sha256``), both atomically. ``chain`` (the block, our stake share, the weights
         path) and ``watch`` (the desk's observations: copy similarities, endings and
-        admissions per coldkey, disables) ride along for readers; recompute needs neither."""
+        admissions per coldkey, disables) ride along for readers; recompute needs neither. The
+        genesis rule, the admitted miners' coldkeys and the ``proven`` hotkeys are published:
+        recompute reads them."""
         window, weight, quality = self.snapshot(now_ms)
         adm, reach = sorted(admitted), sorted(reachable)
+        cold = {h: str((coldkeys or {}).get(h) or "") for h in adm}
+        prov = sorted(set(proven) & set(adm))
         vec, rule = vector(
-            weight, uid_by_hotkey, owner_hotkey=owner_hotkey, admitted=adm, reachable=reach
+            weight,
+            uid_by_hotkey,
+            owner_hotkey=owner_hotkey,
+            admitted=adm,
+            reachable=reach,
+            genesis=genesis,
+            coldkeys=cold,
+            proven=prov,
         )
         rep = {
             "hour": now_ms // self.hour_ms,
@@ -336,6 +380,9 @@ class Ledger:
             "owner": owner_hotkey,
             "admitted": adm,
             "reachable": reach,
+            "genesis": genesis,
+            "coldkeys": cold,
+            "proven": prov,
             "vector": [list(x) for x in vec],
             "rule": rule,
             "chain": dict(chain or {}),
@@ -393,6 +440,9 @@ def recompute(report: Mapping[str, Any]) -> dict[str, Any]:
         owner_hotkey=report["owner"],
         admitted=report["admitted"],
         reachable=report["reachable"],
+        genesis=str(report.get("genesis") or "hotkey"),
+        coldkeys=report.get("coldkeys") or {},
+        proven=report.get("proven") or (),
     )
     same = [list(x) for x in vec] == [list(x) for x in report["vector"]]
     return {"vector": vec, "rule": rule, "matches_published": same, "mismatches": mismatches}

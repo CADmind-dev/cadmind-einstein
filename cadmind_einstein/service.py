@@ -32,12 +32,22 @@ is rate-limited per hotkey and per address. In production a reverse proxy (nginx
 anyway, with TLS, ``client_max_body_size``, ``client_body_timeout``/``client_header_timeout``,
 ``limit_conn`` and ``limit_req``; it is named in ``trusted_proxies`` so its ``X-Real-IP`` is the
 address the per-address limits count (and the proxy itself is not capped per address).
+
+**Signed answers.** Every answer on a miner's (signed) route is signed by the validator's hotkey:
+``X-Einstein-Validator`` (its ss58) and ``X-Einstein-Signature`` over :func:`response_payload` --
+the status, the request's method, path and ``btauth/1`` nonce, the miner's hotkey and the SHA-256
+of the answer's exact bytes. The miner checks it with :func:`verify_response` against the
+validator hotkey it already addresses its requests to, so an answer that was forged, altered,
+replayed from another request or sent to another miner is refused, TLS or not. (A refusal
+answered before the request's signature was checked is signed too: it carries the nonce the
+request named.)
 """
 
 from __future__ import annotations
 
 import base64
 import contextlib
+import hashlib
 import hmac
 import json
 import re
@@ -71,6 +81,9 @@ AGENT_KEY_PER_HOTKEY = (6, 3600.0)
 """agent keys minted per hotkey per hour"""
 AGENT_KEY_PER_IP = (60, 3600.0)
 """agent key requests per client address per hour"""
+RESPONSE_PROTOCOL = "cadmind-einstein-response/1"
+HEADER_VALIDATOR = "X-Einstein-Validator"
+HEADER_RESPONSE_SIGNATURE = "X-Einstein-Signature"
 _BUSY_BODY = b'{"error": "busy, retry"}'
 _BUSY = (
     b"HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\n"
@@ -78,6 +91,60 @@ _BUSY = (
     + b"Retry-After: 5\r\nConnection: close\r\n\r\n"
     + _BUSY_BODY
 )
+
+
+def response_payload(
+    *, status: int, method: str, path: str, nonce: str, hotkey: str, validator: str, body: bytes
+) -> bytes:
+    """The exact bytes a validator signs for one answer (newline-joined UTF-8)."""
+    return "\n".join(
+        (
+            RESPONSE_PROTOCOL,
+            str(int(status)),
+            method.upper(),
+            path,
+            str(nonce),
+            hotkey,
+            validator,
+            hashlib.sha256(body).hexdigest(),
+        )
+    ).encode()
+
+
+def verify_response(
+    headers: Mapping[str, str],
+    body: bytes,
+    *,
+    status: int,
+    method: str,
+    path: str,
+    nonce: str,
+    hotkey: str,
+    validator: str,
+) -> bool:
+    """True when the answer is signed by ``validator`` for this request (its nonce) of ``hotkey``
+    and these exact bytes."""
+    low = {k.lower(): v for k, v in headers.items()}
+    if low.get(HEADER_VALIDATOR.lower()) != validator:
+        return False
+    try:
+        sig = bytes.fromhex(
+            str(low.get(HEADER_RESPONSE_SIGNATURE.lower()) or "").removeprefix("0x")
+        )
+        from bittensor.sp_core import Keypair  # noqa: PLC0415
+
+        payload = response_payload(
+            status=status,
+            method=method,
+            path=path,
+            nonce=nonce,
+            hotkey=hotkey,
+            validator=validator,
+            body=body,
+        )
+        return bool(sig) and bool(Keypair(ss58_address=validator).verify(payload, sig))
+    except Exception:  # noqa: BLE001 -- anything malformed is not a valid signature
+        return False
 
 
 class RateLimit:
@@ -235,8 +302,18 @@ def serve(
     agent_key_per_hotkey: tuple[int, float] = AGENT_KEY_PER_HOTKEY,
     agent_key_per_ip: tuple[int, float] = AGENT_KEY_PER_IP,
     clock: Callable[[], float] = time.monotonic,
+    signer: Any = None,
 ) -> Server:
+    """``signer``: the validator's hotkey (a wallet or a keypair), which signs every answer on a
+    miner's route; without one, answers are unsigned (tests, a local stack)."""
     proxies = frozenset(trusted_proxies)
+    sign_with: Any = None
+    if signer is not None:
+        from bittensor.signing import resolve_signer  # noqa: PLC0415
+
+        sign_with = resolve_signer(signer, role="hotkey")
+        if str(sign_with.ss58_address) != validator_hotkey:
+            raise ValueError("the signer is not the validator's hotkey")
     key_by_hotkey = RateLimit(*agent_key_per_hotkey, clock=clock)
     key_by_ip = RateLimit(*agent_key_per_ip, clock=clock)
 
@@ -260,6 +337,21 @@ def serve(
             self.send_response(code)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(data)))
+            nonce = str(self.headers.get("X-Bittensor-Nonce") or "").strip()
+            if sign_with is not None and self.path.startswith(SIGNED) and nonce:
+                payload = response_payload(
+                    status=code,
+                    method=self.command,
+                    path=self.path,
+                    nonce=nonce[:40],
+                    hotkey=str(self.headers.get("X-Bittensor-Hotkey") or "").strip()[:100],
+                    validator=validator_hotkey,
+                    body=data,
+                )
+                self.send_header(HEADER_VALIDATOR, validator_hotkey)
+                self.send_header(
+                    HEADER_RESPONSE_SIGNATURE, "0x" + bytes(sign_with.sign(payload)).hex()
+                )
             if close:
                 self.send_header("Connection", "close")
                 self.close_connection = True

@@ -549,24 +549,27 @@ class TestWatch(_DeskCase):
             f"line {i} of the hook" if i < 25 else f"my own line {i}" for i in range(40)
         )
         self.deliver("j2", {**tweaked, "src/parts/extra.py": "x = 1\n"}, by=B)
-        small = {"spec/a.toml": "a = 1\n", "src/b.py": "b = 2\n"}  # under 5 lines: no shingles
+        small = {"spec/a.toml": "a = 1\n", "src/b.py": "b = 2\n"}  # two features: digest only
         self.deliver("j3", small, by=C)
         w = self.desk.watch({A: "cold-1", B: "cold-1", C: "cold-2"})
+        self.assertEqual(w["copy_policy"]["containment"], 0.7)
         pairs = w["copy_pairs"]
         self.assertTrue(pairs)
+        keys = {"job", "hotkey", "other_job", "other_hotkey", "similarity", "containment"}
+        keys |= {"sizes", "common", "decided_by", "copy"}
         for pr in pairs:
-            self.assertEqual(
-                set(pr),
-                {"job", "hotkey", "other_job", "other_hotkey", "similarity", "why", "sizes"},
-            )
+            self.assertEqual(set(pr), keys)
         self.assertEqual(len(pairs), 3)  # j2 against j1; j3 against both
         j2 = [pr for pr in pairs if pr["job"] == "j2"]
-        self.assertEqual([(pr["other_job"], pr["why"]) for pr in j2], [("j1", "shingles")])
-        self.assertTrue(0.0 < j2[0]["similarity"] < 0.8, j2)
-        self.assertEqual(self.desk.status("j2")["state"], "done")  # below 0.8: delivered
+        self.assertEqual(
+            [(pr["other_job"], pr["decided_by"], pr["copy"]) for pr in j2],
+            [("j1", "containment", False)],
+        )
+        self.assertTrue(0.0 < j2[0]["containment"] < 0.7, j2)
+        self.assertEqual(self.desk.status("j2")["state"], "done")  # below 0.7: delivered
         j3 = [pr for pr in pairs if pr["job"] == "j3"]
-        self.assertEqual([pr["why"] for pr in j3], ["skipped: no shingles"] * 2)
-        self.assertTrue(all(pr["similarity"] is None for pr in j3))
+        self.assertEqual([pr["decided_by"] for pr in j3], ["normalised digest"] * 2)
+        self.assertFalse(any(pr["copy"] for pr in j3))
         self.desk.clear_watch(len(pairs))
         self.assertEqual(self.desk.watch({})["copy_pairs"], [])
 
@@ -614,12 +617,13 @@ class TestCopyCheckPairs(unittest.TestCase):
         self.assertIsNone(cc.check("j1", A, "d1", a))
         seen: list[dict[str, Any]] = []
         found = cc.check("j2", B, "d2", a, on_pair=seen.append)
-        self.assertEqual(found and found["similarity"], 1.0)
+        self.assertEqual(found and found["why"], "same normalised project")
         self.assertEqual(len(seen), 1)
-        self.assertEqual(seen[0]["similarity"], 1.0)
+        self.assertEqual((seen[0]["similarity"], seen[0]["copy"]), (1.0, True))
         seen.clear()
-        cc.check("j3", C, "d3", frozenset(), on_pair=seen.append)
-        self.assertEqual([s["why"] for s in seen], ["skipped: no shingles"] * 2)
+        self.assertIsNone(cc.check("j3", C, "d3", frozenset(), on_pair=seen.append))
+        self.assertEqual([s["decided_by"] for s in seen], ["normalised digest"] * 2)
+        self.assertFalse(any(s["copy"] for s in seen))
 
 
 class TestColdkeys(unittest.TestCase):

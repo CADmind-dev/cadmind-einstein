@@ -24,7 +24,18 @@ Abuse (DESIGN.md sections 9 and 11): every tick the desk's :meth:`~.desk.Desk.en
 miner whose copies, Watt suspensions, failed entry tests or rejection pattern cross the
 ``--abuse-*`` thresholds (each disable logged and listed in the next report's ``watch``). The
 report's ``watch`` also carries observations used to calibrate the anti-abuse thresholds: every
-copy comparison's similarity, declined and out-of-reach endings and admitted hotkeys per coldkey.
+copy comparison's similarity and containment, declined and out-of-reach endings, rejections,
+failures and admitted hotkeys per coldkey.
+
+Copies (``--copy-*``, :class:`~.similarity.CopyPolicy`): normalised features, containment of the
+smaller output in the other (``--copy-containment`` 0.7) once both have ``--copy-min-features`` (8)
+distinctive features, the normalised digest below that; the features of ``--copy-corpus`` projects
+(public examples) and those common to ``--copy-common-coldkeys`` (3) other coldkeys are subtracted.
+Second opinions (``--second-opinion-*``, :class:`~.desk.SecondOpinion`): a rejected or failed job
+goes to another coldkey (``--second-opinion-wait-s`` 1800 before any other miner may take it), and
+only ``--second-opinion-coldkeys`` (2) distinct coldkeys end it declined or out of reach. Genesis
+(``--genesis``, :func:`~.scoring.vector`): ``delivered`` (default), ``coldkey`` or ``hotkey``.
+Every answer on a miner's route is signed with the validator's hotkey.
 
 The HTTP face listens on 127.0.0.1 by default; in production nginx stands in front (TLS, body
 size, header and body timeouts, ``limit_conn``/``limit_req``) and is named with
@@ -50,10 +61,11 @@ from .chain import (
     SubtensorReader,
     dominance,
 )
-from .desk import AbusePolicy, Desk
+from .desk import AbusePolicy, Desk, SecondOpinion
 from .platform import OperatorClient
-from .scoring import Ledger
+from .scoring import GENESIS, Ledger
 from .service import serve
+from .similarity import CopyPolicy, load_corpus
 from .store import Store
 
 
@@ -119,6 +131,50 @@ def main(argv: list[str] | None = None) -> int:
         default=[],
         help="a reverse proxy's address whose X-Real-IP is trusted (repeatable)",
     )
+    ap.add_argument(
+        "--copy-containment",
+        type=float,
+        default=CopyPolicy.containment,
+        help="share of the smaller output's distinctive features found in the other: a copy",
+    )
+    ap.add_argument(
+        "--copy-min-features",
+        type=int,
+        default=CopyPolicy.min_features,
+        help="distinctive features both outputs need for containment; below, the digest decides",
+    )
+    ap.add_argument(
+        "--copy-common-coldkeys",
+        type=int,
+        default=CopyPolicy.common_coldkeys,
+        help="a feature in outputs of this many other coldkeys is common (0: off)",
+    )
+    ap.add_argument("--copy-window", type=int, default=CopyPolicy.window)
+    ap.add_argument(
+        "--copy-corpus",
+        type=Path,
+        action="append",
+        default=[],
+        help="public example projects (folders or export zips) whose features are subtracted",
+    )
+    ap.add_argument(
+        "--second-opinion-coldkeys",
+        type=int,
+        default=SecondOpinion.coldkeys,
+        help="distinct coldkeys whose rejections/failures end a job declined or out of reach",
+    )
+    ap.add_argument(
+        "--second-opinion-wait-s",
+        type=float,
+        default=SecondOpinion.wait_s,
+        help="how long a rejected/failed job waits for another coldkey's miner",
+    )
+    ap.add_argument(
+        "--genesis",
+        choices=GENESIS,
+        default="delivered",
+        help="who is weighted when no admitted miner has history",
+    )
     ap.add_argument("--max-connections", type=int, default=64)
     ap.add_argument("--max-connections-per-ip", type=int, default=16)
     a = ap.parse_args(argv)
@@ -167,6 +223,18 @@ def main(argv: list[str] | None = None) -> int:
         disable_s=a.abuse_disable_s,
     )
     _log(f"abuse policy: {abuse}")
+    copy_policy = CopyPolicy(
+        containment=a.copy_containment,
+        min_features=a.copy_min_features,
+        common_coldkeys=a.copy_common_coldkeys,
+        window=a.copy_window,
+    )
+    corpus = load_corpus(a.copy_corpus)
+    second = SecondOpinion(coldkeys=a.second_opinion_coldkeys, wait_s=a.second_opinion_wait_s)
+    _log(
+        f"copy policy: {copy_policy}, corpus {len(corpus)} feature(s); {second}; "
+        f"genesis {a.genesis}"
+    )
     desk = Desk(
         platform,
         ledger,
@@ -178,6 +246,10 @@ def main(argv: list[str] | None = None) -> int:
         excluded=excluded,
         abuse=abuse,
         log=_log,
+        coldkeys=lambda: chain.state.coldkey_by_hotkey,
+        copy_policy=copy_policy,
+        copy_corpus=corpus,
+        second_opinion=second,
         **extra,
     )
 
@@ -223,13 +295,18 @@ def main(argv: list[str] | None = None) -> int:
             reachable=desk.reachable(),
             chain=chain_info(),
             watch=watch,
+            genesis=a.genesis,
+            coldkeys=chain.state.coldkey_by_hotkey,
+            proven=desk.proven(),
         )
         desk.clear_watch(len(watch["copy_pairs"]))
-        sims = [p["similarity"] for p in watch["copy_pairs"] if p["similarity"] is not None]
+        pairs = watch["copy_pairs"]
+        conts = [float(p.get("containment") or 0.0) for p in pairs]
         _log(
-            f"hour {rep['hour']} watch: {len(watch['copy_pairs'])} copy comparison(s)"
-            + (f", max similarity {max(sims):.3f}" if sims else "")
-            + f", {sum(1 for p in watch['copy_pairs'] if p['similarity'] is None)} skipped; "
+            f"hour {rep['hour']} watch: {len(pairs)} copy comparison(s)"
+            + (f", max containment {max(conts):.3f}" if conts else "")
+            + f", {sum(1 for p in pairs if p.get('decided_by') == 'normalised digest')} by digest"
+            + f", {sum(1 for p in pairs if p.get('copy'))} copies; "
             f"admitted per coldkey {[len(v) for v in watch['admitted_by_coldkey'].values()]}; "
             f"{len(watch['same_coldkey_endings'])} declined/out-of-reach ending(s) by one coldkey; "
             f"{len(watch['disabled'])} disable(s)"
@@ -287,6 +364,7 @@ def main(argv: list[str] | None = None) -> int:
         reports_dir=a.state_dir / "reports",
         chain_info=chain_info,
         trusted_proxies=a.trusted_proxy,
+        signer=wallet,
         max_connections=a.max_connections,
         max_per_ip=a.max_connections_per_ip,
     )

@@ -353,6 +353,7 @@ class TestReports(unittest.TestCase):
             owner_hotkey=OWNER,
             admitted=[A, C, OWNER],  # C is not registered
             reachable=[A, C, OWNER],
+            proven=[A, C, OWNER],
         )
         self.assertEqual(rep["vector"], [[1, 65535]])
         self.assertTrue(rep["rule"].startswith("genesis"))

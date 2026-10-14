@@ -46,6 +46,13 @@ Every call to the validator is an HTTP POST signed by your hotkey with `btauth/1
 (`bittensor.http_auth.sign(keypair, method="POST", path=..., body=..., receiver_ss58=$VALIDATOR_HOTKEY)`, its
 headers added to the request).
 
+Every answer is **signed by the validator's hotkey**: `X-Einstein-Validator` (its ss58) and
+`X-Einstein-Signature` (sr25519, hex) over these newline-joined UTF-8 lines: `cadmind-einstein-response/1`, the
+HTTP status, `POST`, the path, your request's `X-Bittensor-Nonce`, your hotkey, the validator's hotkey, and the
+lowercase hex SHA-256 of the answer's exact bytes. Check it (`cadmind_einstein.service.verify_response`; the
+reference miners' `signed()` does) and drop an answer that does not verify: it was forged, altered, replayed from
+another request or meant for another miner.
+
 `POST $VALIDATOR_URL/v1/miners/agent_key` with body `{"x25519_public": "<base64 of a fresh 32-byte X25519 public
 key>"}` answers:
 
@@ -116,13 +123,18 @@ If an attempt does not pass, the job goes to **another miner, from scratch**: th
 | What happened | The job | Scores |
 |---|---|---|
 | an attempt passes | **delivered**, charged once | the passing miner scores; every earlier rejection or gate failure on this job scores 0 |
-| two rejections | **declined** (the client reads both messages; the brief is reviewed) | nobody is penalised |
-| two substantive failures, a gate failure among them | **out of reach** | nobody is penalised |
-| four attempts without either of the above | **didn't finish** | each timeout and copy already scored 0 |
+| two rejections, by miners of two coldkeys | **declined** (the client reads both messages; the brief is reviewed) | nobody is penalised |
+| two substantive failures by two coldkeys, a gate failure among them | **out of reach** | nobody is penalised |
+| four attempts without either of the above | **didn't finish** | each timeout and copy already scored 0; held rejections and failures count (0) unless two coldkeys gave them |
+
+A job you rejected or failed goes next to a miner of **another coldkey** (after 30 minutes, to any other miner).
+Hotkeys of one coldkey count as one opinion: they cannot end a job declined or out of reach between them.
 
 - A **timeout** (not accepted within 2 minutes, or late and failing) or a **copy** scores 0 at once.
 - A **rejection** or a **gate failure** is *held*: it scores 0 only if another miner then passes the same job. A
-  rejection someone else overturns counts against you.
+  rejection someone else overturns counts against you. Rejection rates over twice the fleet's (with at least 5
+  rejections), or 3 overturned rejections, disable a hotkey for a day (doubling per strike); the same rule applies
+  to all the hotkeys of one coldkey together.
 - Leaving the subnet mid-job scores nothing, and the job is reassigned.
 
 ## 6. How a passing job scores
@@ -150,13 +162,20 @@ These constants may be re-tuned; every hourly report states the ones it used.
 Copying means handing in another hotkey's output: a delivered project you saw, or your sybil's work. For each
 passing output, the validator:
 
-1. reduces `spec/`, `src/` and `tests/` to shingles of 5 consecutive non-blank lines;
-2. removes the shingles of the project the job started from (the seed, for a later round);
-3. compares the rest with the recent outputs (the last 500) of **other** hotkeys.
+1. reduces `spec/`, `src/` and `tests/` to **features** that cosmetic edits do not change: each Python statement
+   (and each sizeable call in it) with comments, docstrings, layout and every name and string normalised and
+   numbers in one spelling; each TOML value under its key; each other line. Renaming, reordering, reformatting,
+   commenting or padding a copy changes none of its features;
+2. removes the features of the project the job started from (the seed, for a later round), of public example
+   projects, and those common to outputs of 3 or more other coldkeys (the primer's idioms);
+3. compares what is left with the recent outputs (the last 500) of **other** hotkeys.
 
-A Jaccard similarity of **0.8 or more**, or an **identical Watt digest**, is a copy. It scores 0 at once and the job
-is reassigned. Your own earlier outputs never count against you. Starting a client job from Watt's worked example
-and changing little is likely to collide with someone who did the same, so build the client's device.
+An **identical Watt digest**, the **same normalised project**, or a **containment of 0.7 or more** -- 70% of the
+smaller output's distinctive features found in the other, when both have at least 8 -- is a copy. It scores 0 at
+once and the job is reassigned. Your own earlier outputs never count against you. Independent builds of one brief
+share the primer's idioms, which are removed; measured on real builds they stay far below 0.7. Starting a client
+job from Watt's worked example and changing little is likely to collide with someone who did the same, so build
+the client's device. Details: [`../DESIGN.md`](../DESIGN.md) section 9.
 
 ## Weights
 
@@ -165,8 +184,9 @@ and changing little is likely to collide with someone who did the same, so build
   available admitted miners drawn with weight `(quality + 0.05)²`, 10% of jobs go to newcomers and low scorers so
   they can earn a score, and a client's next round goes to the miner who did the previous one if it is free.
 - The vector covers registered, admitted miners seen in the last 24 hours. **Weight is never burned:** an hour with
-  no jobs still pays miners from their history. Before anyone has any history (genesis), it is split equally among
-  admitted, registered and reachable miners. **The subnet owner's hotkey is never weighted.** There is no team
+  no jobs still pays miners from their history. Before anyone has any history (genesis), it is split equally per
+  **coldkey** among admitted, registered and reachable miners that have delivered at least one scored client job;
+  admission alone earns nothing. **The subnet owner's hotkey is never weighted.** There is no team
   miner.
 - **Everything is auditable.** Each hour's report is public at `$VALIDATOR_URL/v1/reports`: the window's jobs with
   their facts and signals (never the client), every score, the vector and the validator's stake share. Each report

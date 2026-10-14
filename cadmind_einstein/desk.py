@@ -33,6 +33,14 @@ only, never the failed project). Fairness is judged on the whole job:
   attempts end it **didn't finish**. None is charged, and no miner is penalised for a job nobody
   could do.
 
+**Independent opinions.** "Nobody could do it" takes miners of different owners: a job a miner
+rejected or failed goes next to a miner of ANOTHER coldkey (``SecondOpinion.wait_s`` later, any
+other miner: its opinion then is not a second one). Rejections and failures end a job declined or
+out of reach only when they come from ``SecondOpinion.coldkeys`` distinct coldkeys; and when a job
+ends undelivered with its held failures all from fewer coldkeys, they count (0) instead of being
+dropped. So hotkeys of one owner cannot end a hard job for free between them. The rejection
+telemetry is also summed per coldkey (:meth:`enforce`).
+
 **Concurrency.** The desk serves up to ``max_inflight`` jobs at once, one miner each. Every slow
 platform call -- granting a job workspace, judging (freeze, fork, ``watt status``, export),
 returning results, revoking keys -- runs in a bounded worker pool, so ``tick`` never waits on one.
@@ -76,7 +84,7 @@ from typing import Any, Protocol
 from .platform import PlatformError
 from .scoring import JobOutcome, Ledger, size_class
 from .sealing import seal
-from .similarity import CopyCheck, shingles
+from .similarity import CopyCheck, CopyPolicy, Entry, fingerprint
 from .store import Store
 
 SUSPENDED = "agent_suspended"
@@ -87,6 +95,8 @@ EXPLORE = 0.10
 THIN_JOBS = 5
 DONE_KEEP_MS = 7 * 24 * 3_600_000
 """how long a finished job stays queryable (and in the store)"""
+SUBSTANTIVE = ("reject", "gate")
+"""attempt kinds that are an opinion on the job (it cannot or should not be done)"""
 UNCOUNTED = ("dereg", "disabled")
 """attempt kinds that do not count toward a job's attempt cap (the miner left the subnet, or was
 disabled for abuse while it held the job)"""
@@ -101,6 +111,19 @@ above the bench's wall-clock limit for a guard run, so Watt ends the run first""
 class _GateRetryError(Exception):
     """The validator's own guard run did not end on its own (still going, an error of the bench,
     stopped by something other than its limits): our side, so the judgement is retried."""
+
+
+@dataclass(frozen=True)
+class SecondOpinion:
+    """When a job's failures stand as "nobody could do it" (DESIGN.md section 4)."""
+
+    coldkeys: int = 2
+    """distinct coldkeys whose rejections or gate failures end a job declined or out of reach, and
+    that must have tried an undelivered job for its held failures to be dropped; 1 restores the
+    per-hotkey rule"""
+    wait_s: float = 1800.0
+    """how long a job a miner rejected or failed waits for a miner of another coldkey before any
+    other miner may take it"""
 
 
 WATCH_PAIRS = 20_000
@@ -269,9 +292,16 @@ class Desk:
         excluded: Iterable[str] = (),
         abuse: AbusePolicy | None = None,
         log: Callable[[str], None] | None = None,
+        coldkeys: Callable[[], Mapping[str, str]] | None = None,
+        copy_policy: CopyPolicy | None = None,
+        copy_corpus: frozenset[bytes] = frozenset(),
+        second_opinion: SecondOpinion | None = None,
     ) -> None:
         self.platform, self.ledger, self.registered = platform, ledger, registered
         self.abuse = abuse or AbusePolicy()
+        self.coldkeys = coldkeys or dict
+        """hotkey -> coldkey, from the last metagraph read (a hotkey with none is its own)"""
+        self.second_opinion = second_opinion or SecondOpinion()
         self.log = log or (lambda _line: None)
         self.admission_brief = admission_brief
         self.accept_s, self.deadlines = accept_s, dict(deadlines or DEADLINE_S)
@@ -286,11 +316,15 @@ class Desk:
         self.excluded = {h for h in excluded if h}
         self.jobs: dict[str, Job] = {}
         self.miners: dict[str, Miner] = {}
-        self.copies = CopyCheck()
+        self.copies = CopyCheck(policy=copy_policy or CopyPolicy(), corpus=copy_corpus)
         self.assigned: dict[str, int] = {}
         self.rejected: dict[str, int] = {}
         self.overturned: dict[str, int] = {}
         self.copied: dict[str, int] = {}
+        self.failed: dict[str, int] = {}
+        """gate failures per hotkey (held or counted), for the per-coldkey watch"""
+        self.delivered: dict[str, int] = {}
+        """delivered (scored, passing) client jobs per hotkey, ever: what genesis weights"""
         self.suspensions: dict[str, int] = {}
         self.admission_failed: dict[str, int] = {}
         self.strikes: dict[str, int] = {}
@@ -352,6 +386,8 @@ class Desk:
                 "outbox": self._outbox,
                 "revoke": self._revoke,
                 "copied": self.copied,
+                "failed": self.failed,
+                "delivered": self.delivered,
                 "suspensions": self.suspensions,
                 "admission_failed": self.admission_failed,
                 "strikes": self.strikes,
@@ -397,6 +433,8 @@ class Desk:
         self._outbox = list(meta.get("outbox") or [])
         self._revoke = list(meta.get("revoke") or [])
         self.copied = dict(meta.get("copied") or {})
+        self.failed = dict(meta.get("failed") or {})
+        self.delivered = dict(meta.get("delivered") or {})
         self.suspensions = dict(meta.get("suspensions") or {})
         self.admission_failed = dict(meta.get("admission_failed") or {})
         self.strikes = dict(meta.get("strikes") or {})
@@ -406,8 +444,11 @@ class Desk:
         self.watch_pairs = list(watch.get("pairs") or [])
         self.watch_dropped = int(watch.get("dropped") or 0)
         copies = sorted(self.store.items("copy").items(), key=lambda kv: int(kv[0]))
-        for k, (job, hk, digest, sh) in copies:
-            self.copies.recent.append((job, hk, digest, frozenset(bytes.fromhex(x) for x in sh)))
+        for k, row in copies:
+            job, hk, digest, sh = row[:4]
+            cold, was_copy = (str(row[4]), bool(row[5])) if len(row) >= 6 else ("", False)
+            feats = frozenset(bytes.fromhex(x) for x in sh)
+            self.copies.remember(Entry(job, hk, digest, feats, cold, copy=was_copy))
             self._copy_seq = max(self._copy_seq, int(k))
         self._recover()
 
@@ -426,16 +467,34 @@ class Desk:
                     if holder is not None:
                         holder.job = job.job
 
-    def _remember_copy(self, job: str, hotkey: str, digest: str, sh: frozenset[bytes]) -> None:
+    def _remember_copy(self, e: Entry) -> None:
         if self.store is None:
             return
         self._copy_seq += 1
         self.store.put(
-            "copy", f"{self._copy_seq:012d}", [job, hotkey, digest, [x.hex() for x in sh]]
+            "copy",
+            f"{self._copy_seq:012d}",
+            [e.job, e.hotkey, e.digest, [x.hex() for x in e.features], e.coldkey, e.copy],
         )
-        old = self._copy_seq - self.copies.recent.maxlen if self.copies.recent.maxlen else 0
+        old = self._copy_seq - max(1, self.copies.policy.window)
         if old > 0:
             self.store.delete("copy", f"{old:012d}")
+
+    def _cmap(self) -> Mapping[str, str]:
+        try:
+            return self.coldkeys() or {}
+        except Exception:  # noqa: BLE001 -- a failed read: every hotkey stands alone
+            return {}
+
+    def coldkey(self, hotkey: str, cmap: Mapping[str, str] | None = None) -> str:
+        """The hotkey's coldkey from the last metagraph read; a hotkey with none stands alone."""
+        ck = str((self._cmap() if cmap is None else cmap).get(hotkey) or "")
+        return ck or f"hotkey:{hotkey}"
+
+    def proven(self) -> list[str]:
+        """Hotkeys that delivered at least one scored client job (genesis weights only these)."""
+        with self._lock:
+            return sorted(h for h, n in self.delivered.items() if n > 0)
 
     # -- the worker pool and the heartbeat ---------------------------------------------------------
 
@@ -603,18 +662,9 @@ class Desk:
             )
             for hk in sorted(hotkeys - self.excluded):
                 why = self._abuse_reasons(hk, fleet)
-                if not why:
-                    continue
-                strike = self.strikes.get(hk, 0) + 1
-                for_s = min(
-                    self.abuse.disable_s * 2 ** (strike - 1),
-                    max(self.abuse.max_disable_s, self.abuse.disable_s),
-                )
-                reason = "; ".join(why)
-                self.strikes[hk] = strike
-                self.abuse_seen[hk] = self._abuse_counts(hk)
-                self._disable(hk, for_s, reason)
-                acted.append({"hotkey": hk, "reason": reason, "strike": strike, "for_s": for_s})
+                if why:
+                    acted.append(self._strike(hk, "; ".join(why)))
+            acted += self._coldkey_strikes(fleet)
         for a in acted:
             self.log(
                 f"disabled {a['hotkey']} for {a['for_s'] / 3600:g} h (strike {a['strike']}): "
@@ -623,6 +673,56 @@ class Desk:
         if acted:
             self._spawn(self._revoke_keys)
         return acted
+
+    def _strike(self, hk: str, reason: str) -> dict[str, Any]:
+        """Inside a mutation: one strike, its block doubling the last."""
+        strike = self.strikes.get(hk, 0) + 1
+        for_s = min(
+            self.abuse.disable_s * 2 ** (strike - 1),
+            max(self.abuse.max_disable_s, self.abuse.disable_s),
+        )
+        self.strikes[hk] = strike
+        self.abuse_seen[hk] = self._abuse_counts(hk)
+        self._disable(hk, for_s, reason)
+        return {"hotkey": hk, "reason": reason, "strike": strike, "for_s": for_s}
+
+    def _coldkey_strikes(self, fleet: float) -> list[dict[str, Any]]:
+        """The rejection rule over each coldkey's hotkeys together (counted since each one's last
+        strike): one owner spreading its rejections over many hotkeys stays under the per-hotkey
+        rule. Every hotkey of a crossing coldkey that rejected since its last strike is disabled.
+        Inside a mutation."""
+        pol = self.abuse
+        if not pol.rejections:
+            return []
+        cmap = self._cmap()
+        by_ck: dict[str, list[str]] = {}
+        for hk in sorted(set(self.assigned) - self.excluded):
+            by_ck.setdefault(self.coldkey(hk, cmap), []).append(hk)
+        out: list[dict[str, Any]] = []
+        for ck, hks in sorted(by_ck.items()):
+            if len(hks) < 2:
+                continue
+            delta: dict[str, dict[str, int]] = {}
+            for hk in hks:
+                now, seen = self._abuse_counts(hk), self.abuse_seen.get(hk, {})
+                delta[hk] = {k: now[k] - int(seen.get(k, 0)) for k in now}
+            r = sum(d["rejected"] for d in delta.values())
+            n = sum(d["assigned"] for d in delta.values())
+            ov = sum(d["overturned"] for d in delta.values())
+            why = ""
+            if r >= pol.rejections_min and n > 0 and r / n > pol.rejection_ratio * fleet:
+                why = (
+                    f"rejections by coldkey {ck[:16]}: {r} of {n} assignments over "
+                    f"{len(hks)} hotkeys, over {pol.rejection_ratio}x the fleet's {fleet:.3f}"
+                )
+            elif pol.overturned and ov >= pol.overturned:
+                why = f"rejections by coldkey {ck[:16]}: {ov} overturned (policy {pol.overturned})"
+            if not why:
+                continue
+            for hk in hks:
+                if delta[hk]["rejected"] > 0:
+                    out.append(self._strike(hk, why))
+        return out
 
     def _suspended(self, hotkey: str) -> None:
         """The platform says Watt suspended this miner (``agent_suspended``): it deleted the key
@@ -790,11 +890,18 @@ class Desk:
     def watch(self, coldkey_by_hotkey: Mapping[str, str]) -> dict[str, Any]:
         """Observations for calibrating the anti-abuse thresholds, published in the hourly report:
 
-        - ``copy_pairs``: every copy comparison since the last report, with its similarity;
+        - ``copy_pairs``: every copy comparison since the last report -- Jaccard ``similarity``
+          and ``containment`` of the distinctive features, their ``sizes``, how many features the
+          learned common set removed (``common``), what decided (``decided_by``) and the verdict
+          (``copy``) -- and ``copy_policy``, the thresholds they were judged by;
         - ``endings_by_coldkey``: per coldkey, the declined and out-of-reach endings its hotkeys
           took part in over the desk's 7-day memory, and ``same_coldkey_endings``: those whose
-          ending attempts all came from one coldkey (possibly colluding hotkeys);
-        - ``admitted_by_coldkey``: the admitted hotkeys per coldkey (sybils at genesis);
+          ending attempts all came from one coldkey (colluding hotkeys; none can end so while
+          ``second_opinion.coldkeys`` is 2 or more);
+        - ``by_coldkey``: per coldkey, its hotkeys' assignments, rejections, overturned
+          rejections, gate failures, copies and delivered jobs (the per-owner rejection rule);
+        - ``admitted_by_coldkey``: the admitted hotkeys per coldkey, and ``proven``: the hotkeys
+          with a delivered client job (genesis weights);
         - ``disabled``: the disables since the last report.
 
         A hotkey with no known coldkey is grouped as ``unknown:<hotkey>``."""
@@ -809,7 +916,7 @@ class Desk:
                 label = str(j.result.get("label") or "") if j.state == "done" else ""
                 if j.kind != "client" or label not in ("declined", "out of reach"):
                     continue
-                ending = [a.hotkey for a in j.attempts if a.kind in ("reject", "gate")]
+                ending = [a.hotkey for a in j.attempts if a.kind in SUBSTANTIVE]
                 key = "declined" if label == "declined" else "out_of_reach"
                 for c in sorted({ck(h) for h in ending}):
                     row = endings.setdefault(c, {"declined": 0, "out_of_reach": 0, "hotkeys": []})
@@ -821,11 +928,33 @@ class Desk:
             for m in self.miners.values():
                 if m.admitted:
                     admitted.setdefault(ck(m.hotkey), []).append(m.hotkey)
+            tallies = {
+                "assigned": self.assigned,
+                "rejected": self.rejected,
+                "overturned": self.overturned,
+                "gate_failed": self.failed,
+                "copies": self.copied,
+                "delivered": self.delivered,
+            }
+            by_coldkey: dict[str, dict[str, Any]] = {}
+            for name, counts in tallies.items():
+                for hk, n in counts.items():
+                    row = by_coldkey.setdefault(
+                        ck(hk), {"hotkeys": [], **dict.fromkeys(tallies, 0)}
+                    )
+                    row[name] += n
+                    if hk not in row["hotkeys"]:
+                        row["hotkeys"].append(hk)
+            for row in by_coldkey.values():
+                row["hotkeys"].sort()
             return {
                 "copy_pairs": list(self.watch_pairs),
                 "copy_pairs_dropped": self.watch_dropped,
+                "copy_policy": asdict(self.copies.policy),
                 "endings_by_coldkey": endings,
                 "same_coldkey_endings": same,
+                "by_coldkey": dict(sorted(by_coldkey.items())),
+                "proven": sorted(h for h, n in self.delivered.items() if n > 0),
                 "admitted_by_coldkey": {k: sorted(v) for k, v in sorted(admitted.items())},
                 "disabled": list(self.disabled_log),
             }
@@ -1022,6 +1151,12 @@ class Desk:
         now = self.now_ms()
         reg = set(self.registered())
         tried = {a.hotkey for a in job.attempts} | set(job.exclude)
+        cmap = self._cmap()
+        # A second opinion comes from another owner: the coldkeys that rejected or failed this job
+        # do not get it again until it has waited ``second_opinion.wait_s``.
+        opinions = {self.coldkey(a.hotkey, cmap) for a in job.attempts if a.kind in SUBSTANTIVE}
+        if not opinions or now - job.queued_ms >= self.second_opinion.wait_s * 1000:
+            opinions = set()
         return [
             m
             for m in self.miners.values()
@@ -1031,6 +1166,7 @@ class Desk:
             and m.blocked_until_ms <= now
             and now - m.last_seen_ms <= ALIVE_S * 1000
             and m.hotkey not in tried
+            and self.coldkey(m.hotkey, cmap) not in opinions
         ]
 
     def route(self, job: Job) -> Miner | None:
@@ -1299,6 +1435,8 @@ class Desk:
             if kind in ("gate", "timeout"):
                 self.admission_failed[a.hotkey] = self.admission_failed.get(a.hotkey, 0) + 1
             return
+        if kind == "gate":
+            self.failed[a.hotkey] = self.failed.get(a.hotkey, 0) + 1
         if kind not in UNCOUNTED:
             o = outcome or JobOutcome(
                 job=job.job,
@@ -1314,16 +1452,25 @@ class Desk:
             else:
                 job.pending.append(o)
         self._release(a.hotkey)
-        substantive = [x for x in job.attempts if x.kind in ("reject", "gate")]
+        substantive = [x for x in job.attempts if x.kind in SUBSTANTIVE]
         counted = [x for x in job.attempts if x.kind not in UNCOUNTED]
-        if len(substantive) < 2 and len(counted) < self.max_attempts:
+        cmap = self._cmap()
+        owners = {self.coldkey(x.hotkey, cmap) for x in substantive}
+        independent = len(owners) >= max(1, self.second_opinion.coldkeys)
+        ends = len(substantive) >= 2 and independent
+        if not ends and len(counted) < self.max_attempts:
             job.state = "queued"
             job.queued_ms = self.now_ms()
             return
-        if len(substantive) >= 2:
+        if ends:
             label = "declined" if all(x.kind == "reject" for x in substantive) else "out of reach"
         else:
             label = "didn't finish"
+        if not independent:
+            # No second owner confirmed that nobody could do it: the held failures count (0).
+            for held in job.pending:
+                held.ended_ms = self.now_ms()
+                self.ledger.add(held)
         job.pending.clear()
         job.state = "done"
         job.result = {
@@ -1480,19 +1627,26 @@ class Desk:
         mine: frozenset[bytes] = frozenset()
         if verdict["deliverable"] and job.kind == "client":
             try:
-                base = shingles(self.platform.export(job.seed)) if job.seed else frozenset()
+                base = fingerprint(self.platform.export(job.seed)).features if job.seed else base
             except PlatformError:
                 base = frozenset()
-            mine = shingles(export)
+            mine = fingerprint(export).features
+        cold = self.coldkey(a.hotkey)
         with self._mut():
             if job.state != "judging" or not job.attempts or job.attempts[-1] is not a:
                 return  # cancelled (or lost) while it was judged: nobody is scored
             copy = None
             if verdict["deliverable"] and job.kind == "client":
                 copy = self.copies.check(
-                    job.job, a.hotkey, verdict["digest"], mine, base, on_pair=self._watch_pair
+                    job.job,
+                    a.hotkey,
+                    verdict["digest"],
+                    mine,
+                    base,
+                    on_pair=self._watch_pair,
+                    coldkey=cold,
                 )
-                self._remember_copy(job.job, a.hotkey, verdict["digest"], mine)
+                self._remember_copy(self.copies.recent[-1])
                 outcome.copy_of = str(copy["job"]) if copy else ""
                 if copy:
                     self.copied[a.hotkey] = self.copied.get(a.hotkey, 0) + 1
@@ -1528,6 +1682,8 @@ class Desk:
             job.pending.clear()
             outcome.kind = "pass"
             s = self.ledger.add(outcome)
+            if job.kind == "client":
+                self.delivered[a.hotkey] = self.delivered.get(a.hotkey, 0) + 1
             a.outcome, a.kind = "judged", "pass"
             self._release(a.hotkey)
             job.state = "done"

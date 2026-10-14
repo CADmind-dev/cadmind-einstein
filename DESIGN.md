@@ -96,9 +96,15 @@ validator: freeze on submit, fork, read Watt's verdict (the gate), copy check, s
   | What happened | The job | Charged | Scores |
   |---|---|---|---|
   | an attempt passes the gate | **delivered** | yes, once | the passing miner scores; every earlier rejection or gate failure on this job scores 0 |
-  | two rejections | **declined**: the client reads both messages; the brief is flagged for review | no | nobody penalised |
-  | two substantive failures, a gate failure among them | **out of reach** | no | nobody penalised |
-  | four attempts without either of the above (timeouts, copies) | **didn't finish** | no | each timeout and copy already scored 0 |
+  | two rejections, from two coldkeys | **declined**: the client reads both messages; the brief is flagged for review | no | nobody penalised |
+  | two substantive failures from two coldkeys, a gate failure among them | **out of reach** | no | nobody penalised |
+  | four attempts without either of the above (timeouts, copies) | **didn't finish** | no | each timeout and copy already scored 0; held rejections and failures count (0) unless two coldkeys gave them |
+
+- **A second opinion is another owner's.** A job one miner rejected or failed goes next to a miner of another
+  coldkey; only after `--second-opinion-wait-s` (30 minutes) may any other miner take it, and that miner's opinion
+  is then not a second one. A job ends declined or out of reach only on opinions from `--second-opinion-coldkeys`
+  (2) distinct coldkeys, and an undelivered job whose rejections and failures all came from fewer coldkeys counts
+  them (0) instead of dropping them. So hotkeys of one owner cannot end a hard job for free between them.
 
 - Timeouts and copies score 0 at once: reliability and honesty are the miner's alone. A rejection or a gate failure
   is **held**: it scores 0 only when another miner passes the same job. That is what stops miners rejecting hard
@@ -145,8 +151,16 @@ passing job:   I = 0.5 + 0.3·E + 0.2·T            immediate: passed the gate, 
   *mean*.
 - The vector is proportional to the weight over registered, admitted miners seen in the last 24 hours, and is set
   **every hour**. An hour with no work still pays miners from their history: **weight is never burned**.
-- **Genesis** (no history at all): equal weight among miners that passed admission and are registered and
-  reachable. Nothing is emitted only when no miner has ever been admitted.
+- **Genesis** (no admitted miner has history in the window), `--genesis`:
+  - `delivered` (default): equal weight **per coldkey** among admitted, registered, reachable miners that have
+    delivered at least one scored client job (ever), each coldkey's share split among its hotkeys. Admission is a
+    cheap, unscored entry test, so it earns nothing on its own: hotkeys registered only to farm genesis get no
+    weight. Before the first delivery nothing is weighted.
+  - `coldkey`: equal per coldkey among admitted, registered, reachable miners.
+  - `hotkey`: equal per hotkey among them (an earlier rule; it pays in proportion to hotkeys registered).
+
+  Each report publishes the rule, the admitted miners' coldkeys and the hotkeys with a delivered job, and
+  `cadmind-recompute` follows them (a report without a `genesis` field was made by the `hotkey` rule).
 - **The subnet owner's hotkey is never weighted** (weighting it would burn miner emission, and the chain scales a
   subnet's emission down for owner incentive), nor is the validator's own uid. These are dropped again at the last
   step before the chain call, whatever the scorer produced.
@@ -205,11 +219,45 @@ the client is), every score, each miner's weight and quality, the admitted and r
 |---|---|
 | A thin or broken output | It fails the gate (reassigned; 0 if another miner passes) or passes thin and the client's signal says so |
 | A miner rating its own jobs from a fake client | Miners never learn the client; the router assigns jobs; free accounts' signals weigh 0.1 |
-| Rejecting hard work | A rejection another miner overturns scores 0; rejection telemetry flags the pattern and disables repeat offenders |
-| Copying another miner's output | Shingles of 5 consecutive non-blank lines of `spec/ src/ tests/`, minus the starting project's, against the last 500 outputs of OTHER hotkeys; Jaccard ≥ 0.8 or an identical Watt digest is a copy: 0 at once, reassigned |
-| Sybils | Each hotkey holds one job and is scored on its own; registration costs; admission costs a working agent run |
+| Rejecting hard work | A rejection another miner overturns scores 0; rejection telemetry, per hotkey and summed per coldkey, disables repeat offenders |
+| Copying another miner's output | Normalised features compared by containment (below); 0 at once, reassigned |
+| Sybils | Each hotkey holds one job and is scored on its own; registration costs; genesis weight goes per coldkey to miners with a delivered job, never for admission alone |
 | Abuse of hosted compute | Per-job and per-key quotas, one run at a time, automatic disable |
-| Collusion between hotkeys | Endings and admissions are published per coldkey in each report (`watch`) |
+| Collusion between hotkeys | Second opinions come from another coldkey, and only two coldkeys end a job unpaid; endings, rejections, failures and admissions are published per coldkey in each report (`watch`) |
+
+### Copies
+
+With one miner per job there is no round to copy within, but a miner can hand in another job's output (a delivered
+project it saw, or its sybil's). Each passing output's `spec/ src/ tests/` is reduced to **features** that cosmetic
+edits do not change:
+
+- **Python** is parsed; comments, docstrings, `pass` and bare constants are dropped; every identifier (names,
+  attributes, arguments, keyword names, functions, classes) becomes one placeholder, every string another, and
+  numbers get one spelling (`2` = `2.0`). Each statement (a compound statement by its header) and each call of six
+  or more syntax nodes is a feature. Renaming, reformatting, commenting, reordering or inserting statements leaves
+  every other feature as it was.
+- **TOML** is parsed; each leaf -- its table's kind, its key, its normalised value -- is a feature, whatever the
+  table is named.
+- **Other text** (and Python that does not parse): each normalised line of eight or more characters.
+
+Before comparing, the validator subtracts what honest builds share: the features of the project the job started
+from (its seed), of a corpus of public example projects (`--copy-corpus`: project folders or export zips, such as
+the worked example), and the **common set** -- features present in non-copy outputs of `--copy-common-coldkeys` (3)
+distinct coldkeys other than the two compared. Outputs judged copies never feed the common set, and one coldkey's
+hotkeys count once, so a copier cannot make its victim's features common.
+
+An output copies a recent output (the last `--copy-window`, 500) of **another** hotkey when the Watt digests are
+identical; when their normalised features are identical (a small project is compared this way, not skipped); or,
+when both have at least `--copy-min-features` (8) distinctive features, when the **containment** -- the share of the
+smaller one's distinctive features found in the other -- reaches `--copy-containment` (0.7). Containment rather
+than Jaccard: a copy padded with unrelated material still contains its victim.
+
+On 35 independent builds of 13 briefs by agents using the same primer, same-brief containment stayed at or below
+0.34 (0.16 with the common set); copies disguised by comments, renames, reordering, dead statements, padding or
+all of these together scored 1.0; changing 30% of the numbers still left them above 0.74. Every comparison is
+published in the hourly report (`watch.copy_pairs`: similarity, containment, sizes, features removed as common,
+what decided, the verdict; `watch.copy_policy`: the thresholds), so the thresholds can be re-checked on live
+traffic. A copier who rewrites most statements has re-implemented the design; that is out of this check's reach.
 
 ## 10. A single, auditable validator
 
@@ -229,7 +277,8 @@ makes no chain write at all (vector and report hash are logged).
 - **Disables.** Every tick the validator disables a miner whose counts since its last strike cross the policy:
   copies (2), Watt suspensions (1: the platform suspends a key on Watt-side telemetry such as secrecy refusals or
   quota storms), failed entry tests (3), or the rejection pattern (at
-  least 5 rejections at over twice the fleet's rate, or 3 overturned rejections). A disable revokes the key, drops
+  least 5 rejections at over twice the fleet's rate, or 3 overturned rejections; the same rule is applied to each
+  coldkey's hotkeys together, so spreading rejections over hotkeys does not hide them). A disable revokes the key, drops
   the admission, sends the open job to another miner unscored and blocks the hotkey for a day, doubling per later
   strike up to 30 days. All thresholds are daemon flags (`--abuse-*`; 0 turns a rule off). Every disable is logged
   and listed in the next hourly report.
@@ -241,6 +290,13 @@ makes no chain write at all (vector and report hash are logged).
   Bearer route without the token. Bodies are capped at 4 MiB; every read has a timeout and every request a
   deadline; connections are capped in all and per address; agent-key minting is rate-limited per hotkey (6/h) and
   per address (60/h). In production a TLS reverse proxy stands in front and is named with `--trusted-proxy`.
+- **Signed answers.** Every answer on a miner's route carries `X-Einstein-Validator` (the validator's ss58) and
+  `X-Einstein-Signature`, the validator hotkey's sr25519 signature over newline-joined UTF-8 lines:
+  `cadmind-einstein-response/1`, the HTTP status, the method, the path, the request's `X-Bittensor-Nonce`, the
+  miner's hotkey, the validator's hotkey, and the hex SHA-256 of the answer's exact bytes. A miner checks it with
+  `cadmind_einstein.service.verify_response` (the reference miners do, and drop an answer that does not verify), so
+  an answer forged, altered, replayed from another request or meant for another miner is refused even without
+  TLS.
 
 ## 12. Privacy
 

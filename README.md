@@ -72,7 +72,11 @@ cadmind-einstein --state-dir ~/.local/share/cadmind-einstein \
   weights (`bt.SetWeights`, plain or commit-reveal as the subnet runs, within `weights_rate_limit`) and commit each
   report's SHA-256 (`set_commitment`).
 - `--max-inflight` caps jobs in flight (the hosted bench's capacity); `--sync-s` is the metagraph re-read interval;
-  `--accept-s` the acceptance window; `--abuse-*` the disable policy (0 turns a rule off).
+  `--accept-s` the acceptance window; `--abuse-*` the disable policy (0 turns a rule off); `--copy-*` the copy
+  check (`--copy-containment` 0.7, `--copy-min-features` 8, `--copy-common-coldkeys` 3, `--copy-window` 500, and
+  `--copy-corpus PATH`, repeatable: public example projects whose features never count as evidence);
+  `--second-opinion-coldkeys` (2) and `--second-opinion-wait-s` (1800) the second-opinion rule; `--genesis`
+  (`delivered`, `coldkey` or `hotkey`) who is weighted before anyone has history.
 - The HTTP face listens on `127.0.0.1:8793` by default. In production put a TLS reverse proxy in front
   ([`deploy/nginx-einstein.conf`](deploy/nginx-einstein.conf)) and pass `--trusted-proxy 127.0.0.1`.
 - State lives in `STATE/einstein.sqlite3`; reports in `STATE/reports/hour-N.json` with `hour-N.sha256` beside them.
@@ -103,6 +107,10 @@ your model provider's terms.
 ## Protocol
 
 ### Miner routes (signed with `btauth/1` by a registered hotkey, addressed to the validator's hotkey)
+
+Every answer on these routes is signed by the validator's hotkey (`X-Einstein-Validator`,
+`X-Einstein-Signature`; check it with `cadmind_einstein.service.verify_response`, see
+[`docs/MINER.md`](docs/MINER.md) section 2).
 
 | Route | Body | Answer |
 |---|---|---|
@@ -155,8 +163,9 @@ where `E` compares the job's compute and wall time with the median of similar pa
 the client's stars, download, re-run or change request, weighted by account trust (paid 1, free 0.1). An unrated
 job scores exactly `I`. A miner's weight is the sum of its job scores decayed with a 24-hour half-life (7-day
 window); the hourly vector is proportional to it over registered, admitted, recently seen miners. Weight is never
-burned and the subnet owner's hotkey is never weighted; at genesis the weight is split equally among admitted
-miners. Details: [`DESIGN.md`](DESIGN.md) section 5.
+burned and the subnet owner's hotkey is never weighted; at genesis (nobody has history) the weight is split
+equally per coldkey among admitted miners that have delivered a scored client job, so registering hotkeys earns
+nothing on its own. Details: [`DESIGN.md`](DESIGN.md) section 5.
 
 **Audit it yourself:** download the reports and run
 
@@ -174,15 +183,24 @@ report's hash with the validator's on-chain commitment.
 - Miners never learn which client a job came from; the router, not the miner, assigns jobs; free accounts' ratings
   weigh 0.1.
 - Rejections and gate failures are held and count against the miner only when another miner passes the job;
-  rejection rates far above the fleet's, or repeatedly overturned rejections, disable the hotkey.
-- Copies (5-line shingles of the project, Jaccard ≥ 0.8 against other hotkeys' recent outputs, or an identical
-  digest) score 0 and are reassigned.
+  rejection rates far above the fleet's, or repeatedly overturned rejections, disable the hotkey; the same rule
+  applies to each coldkey's hotkeys together.
+- A rejected or failed job goes next to a miner of another coldkey, and only opinions from two coldkeys end a job
+  declined or out of reach: hotkeys of one owner cannot end hard jobs for free.
+- Copies score 0 and are reassigned. Outputs are compared as normalised features (Python statements with names,
+  strings, comments and layout normalised; TOML values; other lines), so renaming, reformatting, commenting,
+  reordering or padding a copy does not hide it; a copy is an identical digest, identical normalised features, or a
+  containment of 0.7 of the smaller output in the other. What honest builds share -- the starting project, public
+  example projects, and features common to three other coldkeys -- is subtracted first.
+- Genesis weight goes per coldkey to miners with a delivered job, never for admission alone.
+- Every answer on a miner route is signed by the validator's hotkey.
 - Copies, platform suspensions, repeated failed admission tests and the rejection pattern disable a hotkey for a
   day, doubling per strike (up to 30 days): key revoked, admission dropped, open job reassigned.
 - The HTTP face refuses malformed or oversized requests before reading a body, bounds connections and request
   time, and is meant to sit behind a TLS proxy.
-- Each hourly report carries a `watch` section (copy similarities, endings and admissions per coldkey, disables)
-  for calibrating these thresholds; it never changes a score.
+- Each hourly report carries a `watch` section (every copy comparison's similarity and containment, the copy
+  thresholds, endings, rejections, failures, deliveries and admissions per coldkey, disables) for calibrating these
+  thresholds; it never changes a score.
 
 ## License
 

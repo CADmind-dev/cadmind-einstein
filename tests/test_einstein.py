@@ -291,9 +291,15 @@ class TestScoring(unittest.TestCase):
             vector(weight2, uids, owner_hotkey=OWNER, admitted=[A, B], reachable=[A, B])[0],
             [(1, 65_535)],
         )
-        # genesis: no history at all -- equal among admitted, reachable miners; never the owner
+        # genesis by hotkey: no history at all -- equal among admitted, reachable miners; never
+        # the owner
         vec, rule = vector(
-            {}, uids, owner_hotkey=OWNER, admitted=[A, B, OWNER], reachable=[A, B, OWNER]
+            {},
+            uids,
+            owner_hotkey=OWNER,
+            admitted=[A, B, OWNER],
+            reachable=[A, B, OWNER],
+            genesis="hotkey",
         )
         self.assertEqual(vec, [(1, 65_535), (2, 65_535)])
         self.assertTrue(rule.startswith("genesis"))

@@ -29,23 +29,47 @@ from .sealing import new_keypair, open_sealed
 
 
 def signed(
-    keypair: Any, base: str, path: str, body: Mapping[str, Any], receiver: str
+    keypair: Any,
+    base: str,
+    path: str,
+    body: Mapping[str, Any],
+    receiver: str,
+    *,
+    require_signed: bool = True,
 ) -> tuple[int, Any]:
+    """POST a ``btauth/1``-signed request to the validator ``receiver``; its answer must carry the
+    validator's signature over this request (:func:`.service.verify_response`), or it is taken as
+    no answer (status 0) -- unless ``require_signed`` is off."""
     import bittensor.http_auth as btauth  # noqa: PLC0415
 
+    from .service import verify_response  # noqa: PLC0415
+
     raw = json.dumps(dict(body)).encode()
-    headers = {
-        "Content-Type": "application/json",
-        **btauth.sign(keypair, method="POST", path=path, body=raw, receiver_ss58=receiver),
-    }
+    auth = btauth.sign(keypair, method="POST", path=path, body=raw, receiver_ss58=receiver)
+    headers = {"Content-Type": "application/json", **auth}
     req = urllib.request.Request(base.rstrip("/") + path, data=raw, headers=headers)  # noqa: S310 -- configured
     try:
         with urllib.request.urlopen(req, timeout=60) as r:  # noqa: S310
-            return r.status, json.loads(r.read() or b"{}")
+            code, answer, got = r.status, r.read(), dict(r.headers.items())
     except urllib.error.HTTPError as e:
-        return e.code, json.loads(e.read() or b"{}")
+        code, answer, got = e.code, e.read(), dict(e.headers.items())
     except OSError as e:  # the validator restarting: said as no answer, and the loop polls again
         return 0, {"error": f"validator unreachable: {type(e).__name__}"}
+    if require_signed and not verify_response(
+        got,
+        answer,
+        status=code,
+        method="POST",
+        path=path,
+        nonce=auth["X-Bittensor-Nonce"],
+        hotkey=auth["X-Bittensor-Hotkey"],
+        validator=receiver,
+    ):
+        return 0, {"error": f"the validator's answer ({code}) is not signed by {receiver}"}
+    try:
+        return code, json.loads(answer or b"{}")
+    except ValueError:
+        return code, {"error": "the validator's answer is not JSON"}
 
 
 class Mcp:
