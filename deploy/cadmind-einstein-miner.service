@@ -1,0 +1,19 @@
+# The reference einstein miner as a systemd user unit (systemctl --user). The agent CLI must be on
+# PATH and already configured with your own model credentials; follow your provider's terms.
+[Unit]
+Description=CADmind einstein reference miner
+After=network-online.target
+
+[Service]
+Environment=PYTHONUNBUFFERED=1
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=%h/cadmind-einstein/.venv/bin/cadmind-einstein-miner \
+  --wallet-name MINER_WALLET --wallet-hotkey MINER_HOTKEY_NAME \
+  --validator https://VALIDATOR_HOST --validator-hotkey VALIDATOR_SS58 \
+  --platform https://cadmind.ai \
+  --state %h/.local/share/cadmind-einstein-miner
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,213 @@
+# Mining einstein
+
+How to mine CADmind's einstein engine on its Bittensor subnet: registering, getting your agent key, the job
+protocol, how a job is scored, what counts as copying, and how to run an agent CLI (or any MCP client) as your miner.
+The design behind it is in [`../DESIGN.md`](../DESIGN.md).
+
+The placeholders below are `$NETUID` (the subnet), `$NETWORK` (`test` or `finney`), `$VALIDATOR_URL` and
+`$VALIDATOR_HOTKEY` (the validator's address and SS58 hotkey), and `$PLATFORM` (the CADmind platform,
+`https://cadmind.ai`). The subnet's announcement gives their values.
+
+## What you do
+
+A client describes a device. The validator gives the job to **one** miner: you. Your agent builds the device as a
+Watt project (`spec/`, `src/`, `tests/`) in a job workspace on CADmind's hosted Watt agent bench. It reaches the
+bench only through the platform's agent API: MCP, or the same tools over REST. You submit when `watt status` says
+**deliverable**. Your output is the client's result. Nobody else builds that job unless yours fails.
+
+- **Any model and any harness.** Only the outcome is measured. The harness (how you plan, check and recover) is
+  where miners compete.
+- **No work without a client.** There are no benchmarks and no synthetic tasks. When there are no client jobs, you
+  poll and wait, and your weight comes from your recent history (see [Weights](#weights)).
+- **One job at a time per hotkey.**
+
+## Your model provider's terms are your responsibility
+
+You choose and pay for your own inference, and you must follow your model provider's terms. Many consumer plans do
+not allow automated or commercial use, and reselling access to a closed model in breach of its terms is not allowed
+on this subnet. Use a plan or an API agreement that permits what you do. Which model you use is not checked.
+
+## 1. Register a hotkey
+
+```bash
+btcli wallet new_coldkey --wallet.name miner
+btcli wallet new_hotkey  --wallet.name miner --wallet.hotkey m1
+btcli subnet register --netuid "$NETUID" --subtensor.network "$NETWORK" --wallet.name miner --wallet.hotkey m1
+```
+
+Only registered hotkeys are served. Each request is checked against the validator's metagraph, which it re-reads
+every few minutes. **If your hotkey deregisters, its agent key is revoked**, its admission is dropped, and the job it
+holds goes to another miner without scoring you. If you register again, ask for a new key and pass admission again.
+The subnet owner's hotkey and the validator's own hotkey cannot mine.
+
+## 2. Get your agent key (hotkey-bound, sealed to you)
+
+Every call to the validator is an HTTP POST signed by your hotkey with `btauth/1`
+(`bittensor.http_auth.sign(keypair, method="POST", path=..., body=..., receiver_ss58=$VALIDATOR_HOTKEY)`, its
+headers added to the request).
+
+`POST $VALIDATOR_URL/v1/miners/agent_key` with body `{"x25519_public": "<base64 of a fresh 32-byte X25519 public
+key>"}` answers:
+
+```json
+{"key_id": "...", "sealed": {"scheme": "x25519-hkdf-sha256-aes256gcm/1",
+ "ephemeral": "<b64>", "nonce": "<b64>", "ciphertext": "<b64: ciphertext || 16-byte tag>"}}
+```
+
+To open it:
+
+1. Compute X25519(your private key, `ephemeral`).
+2. Run HKDF-SHA256 for 32 bytes, with salt = `ephemeral` ‖ your public key and info = `cadmind-agent-key/1` ‖ your
+   hotkey's SS58 address (UTF-8).
+3. Decrypt with AES-256-GCM, using `nonce` and your SS58 address as associated data.
+
+`cadmind_einstein/sealing.py` is a reference implementation:
+
+```python
+from cadmind_einstein.sealing import new_keypair, open_sealed
+
+priv, pub = new_keypair()
+# ... POST the base64 of `pub`, signed ...
+agent_key = open_sealed(answer["sealed"], priv, my_hotkey_ss58)
+```
+
+Asking again rotates the key and the old key stops working. Key requests are rate-limited (6 per hotkey per hour,
+429 past it), so keep the one you have, and keep it secret: it is your quota and your score. Each key has a daily
+compute quota and each job workspace a per-job compute cap on the platform (`usage` shows yours); quota storms or
+secrecy refusals can suspend a key automatically. The validator also disables a hotkey for a day (longer on a
+repeat) on copies, a suspension, repeated failed admission tests, or a pattern of rejections that other miners
+overturn: its key is revoked, its admission dropped and its open job given to another miner.
+
+## 3. Pass admission (once)
+
+`POST /v1/miners/admission` (signed, empty body) creates a job assigned to you alone: *make this project
+deliverable*. Watt's worked example will do: `watt example`, bring it into the workspace, then `watt test --mutate`
+until `watt status` says deliverable, then submit. Passing admits you. Admission is never scored, and you can try
+once a day. Only admitted miners get client jobs.
+
+## 4. The job protocol
+
+All calls are signed POSTs to `$VALIDATOR_URL`.
+
+| Call | Body | Answer / rule |
+|---|---|---|
+| `/v1/jobs/work` | `{}` | `{job, workspace, brief, effort, accepted, accept_by_ms, deadline_ms}` or `{job: null}`. **Poll every few seconds.** Polling is how the validator knows you are alive: you are routed jobs only if you polled in the last 60 s. |
+| `/v1/jobs/accept` | `{job}` | Within **2 minutes** of the assignment. Your deadline then starts: low 30, medium 60, high 120, max 180 minutes. |
+| `/v1/jobs/submit` | `{job, workspace, digest}` | When `watt status` in the workspace says `deliverable`. `digest` is the digest it reports. The workspace is frozen (read-only to you) at once. |
+| `/v1/jobs/reject` | `{job, category, message}` | Instead of building. `category` is `not-allowed` or `not-capable`, the two classes of the scope guide (served through `watt_guide`). `message` is written for the client. |
+| `/v1/miners/receipt` | `{}` | Your recent jobs with their scores, your weight and your quality. |
+
+- The job workspace is **created for you** from the client's brief (or, for a later round of a client's project,
+  from the delivered project) and granted to your key. You cannot delete it, and it does not count against your
+  practice quota. Work in it, not in a workspace of your own.
+- At the deadline, an accepted job is judged as it stands (frozen and gated). Late and failing counts as a timeout.
+- You never see which client a job came from, and you never see another miner's rejection message.
+
+## 5. The gate, reassignment and how a job ends
+
+**The gate is Watt's own verdict.** The validator forks your frozen workspace and reads `watt status` there. You
+pass when the project is **deliverable**: every check passes and the mutation guard is recorded for the current
+digest. Nothing is re-run, so whatever made it deliverable must be in the workspace.
+
+If an attempt does not pass, the job goes to **another miner, from scratch**: the brief only, never your project.
+
+| What happened | The job | Scores |
+|---|---|---|
+| an attempt passes | **delivered**, charged once | the passing miner scores; every earlier rejection or gate failure on this job scores 0 |
+| two rejections | **declined** (the client reads both messages; the brief is reviewed) | nobody is penalised |
+| two substantive failures, a gate failure among them | **out of reach** | nobody is penalised |
+| four attempts without either of the above | **didn't finish** | each timeout and copy already scored 0 |
+
+- A **timeout** (not accepted within 2 minutes, or late and failing) or a **copy** scores 0 at once.
+- A **rejection** or a **gate failure** is *held*: it scores 0 only if another miner then passes the same job. A
+  rejection someone else overturns counts against you.
+- Leaving the subnet mid-job scores nothing, and the job is reassigned.
+
+## 6. How a passing job scores
+
+There is no LLM grader. **The clients are the graders.**
+
+```
+I = 0.5 + 0.3·E + 0.2·T              immediate: passed the gate, efficiency, on time
+s = 0.4·I + 0.6·(w·C + (1 - w)·I)    about 40% immediate, about 60% the client's reaction
+```
+
+- `E`, **efficiency**, is half `min(1, median compute / yours)` and half `min(1, median wall time / yours)`,
+  measured against passing jobs of the same effort and brief size over the last 7 days. It is 1 while there are
+  fewer than 5 of those. Compute is the platform's meter, so it cannot be faked.
+- `T` is 1 if the job was on time and 0 if late.
+- `C` and `w` come from the **client's reaction**: stars weigh most (`C = (stars - 1)/4`, `w = trust`); a download
+  without stars gives `C = 0.75`, `w = 0.5·trust`; each re-run or change request lowers `C` by 0.25 with `w` at least
+  `0.5·trust`; no reaction gives `w = 0`, so `s = I`.
+- `trust` is 1 for a paying account and 0.1 for a free one. Signals that arrive later still change the job's score.
+
+These constants may be re-tuned; every hourly report states the ones it used.
+
+## 7. What counts as copying
+
+Copying means handing in another hotkey's output: a delivered project you saw, or your sybil's work. For each
+passing output, the validator:
+
+1. reduces `spec/`, `src/` and `tests/` to shingles of 5 consecutive non-blank lines;
+2. removes the shingles of the project the job started from (the seed, for a later round);
+3. compares the rest with the recent outputs (the last 500) of **other** hotkeys.
+
+A Jaccard similarity of **0.8 or more**, or an **identical Watt digest**, is a copy. It scores 0 at once and the job
+is reassigned. Your own earlier outputs never count against you. Starting a client job from Watt's worked example
+and changing little is likely to collide with someone who did the same, so build the client's device.
+
+## Weights
+
+- Every hour the validator computes your **weight**: the sum of your job scores, each halving every 24 hours of age
+  (a 7-day window). Your **quality** is the decayed mean of your job scores, which the router uses: jobs go to
+  available admitted miners drawn with weight `(quality + 0.05)²`, 10% of jobs go to newcomers and low scorers so
+  they can earn a score, and a client's next round goes to the miner who did the previous one if it is free.
+- The vector covers registered, admitted miners seen in the last 24 hours. **Weight is never burned:** an hour with
+  no jobs still pays miners from their history. Before anyone has any history (genesis), it is split equally among
+  admitted, registered and reachable miners. **The subnet owner's hotkey is never weighted.** There is no team
+  miner.
+- **Everything is auditable.** Each hour's report is public at `$VALIDATOR_URL/v1/reports`: the window's jobs with
+  their facts and signals (never the client), every score, the vector and the validator's stake share. Each report
+  names the previous report's SHA-256, and the newest hash is committed on chain. Check it yourself:
+
+  ```bash
+  cadmind-recompute hour-A.json ... hour-N.json --network "$NETWORK" --netuid "$NETUID" \
+      --validator-hotkey "$VALIDATOR_HOTKEY"
+  ```
+
+## Running an agent as your miner
+
+Your agent needs two things. The **platform's MCP server** (`$PLATFORM/mcp`, streamable HTTP, `Authorization:
+Bearer <agent key>`) runs Watt. A **small poller** speaks the signed validator protocol, which an MCP client cannot
+sign. The MCP tools are `watt_guide`, `workspace_list`, `list_files`, `read_file`, `write_file`, `edit_file`,
+`delete_file`, `watt` / `watt_wait` / `watt_cancel` (check, build, test, `test` with `mutate`, status, report),
+`view_image`, `fetch` (datasheets) and `usage`. The same tools are under `$PLATFORM/api/agent/...` for a REST
+harness, and `$PLATFORM/llms.txt` describes them.
+
+This repository ships two miners:
+
+- **`cadmind-einstein-miner`** (`cadmind_einstein/agent_miner.py`): a complete reference miner. It gets and stores
+  the key (mode 0600), writes the MCP config, requests admission, polls, accepts, runs your agent CLI in an empty
+  directory restricted to the Watt MCP server, keeps polling while the agent works, and submits `DONE <digest>` or
+  sends `REJECT <category>: <message>`. By default it runs Claude Code's CLI (`claude -p`, `--strict-mcp-config`,
+  `--allowedTools mcp__cadmind-watt`); `--agent-cli`, `--model` and `--agent-arg` configure it, and
+  `--agent-command` runs any other agent CLI from an argv template. Your CLI uses whatever credentials you have
+  configured for it.
+
+  ```bash
+  pip install -e .                 # from a checkout of this repository
+  cadmind-einstein-miner --wallet-name miner --wallet-hotkey m1 \
+      --validator "$VALIDATOR_URL" --validator-hotkey "$VALIDATOR_HOTKEY" \
+      --platform "$PLATFORM" --state ~/.local/share/cadmind-einstein-miner --model <your model>
+  ```
+
+- **`cadmind-einstein-fake-miner`** (`cadmind_einstein/fake_miner.py`): a scripted miner with no model that rebuilds
+  a reference Watt project file by file through MCP. It is the shortest complete example of the protocol side, and
+  its `signed()` helper does the request signing. Replace its `build()` with your agent.
+
+Restrict the agent to the MCP tools: it needs no shell and no files of yours, because everything happens in the job
+workspace. Accept **before** starting the agent, and keep polling `work` while it runs, or you stop being reachable.
+The harness is where you compete: planning, reading `watt check` output, recovering from a failed guard and keeping
+compute low all show up in your score.
+
+A systemd user unit for the reference miner is in [`../deploy/cadmind-einstein-miner.service`](../deploy/cadmind-einstein-miner.service).

@@ -1,0 +1,58 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cadmind-einstein"
+version = "0.1.0"
+description = "CADmind einstein on Bittensor: the validator (job desk, Watt gate, scoring, weights) and reference miners"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3.12",
+]
+dependencies = [
+    "bittensor>=11.0.1,<12",
+    # X25519 + HKDF + AES-GCM for the sealed agent key
+    "pycryptodome>=3.21",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8"]
+dev = ["pytest>=8", "ruff>=0.6"]
+
+[project.scripts]
+cadmind-einstein = "cadmind_einstein.daemon:main"
+cadmind-recompute = "cadmind_einstein.scoring:main"
+cadmind-einstein-miner = "cadmind_einstein.agent_miner:main"
+cadmind-einstein-fake-miner = "cadmind_einstein.fake_miner:main"
+
+[tool.setuptools.packages.find]
+include = ["cadmind_einstein", "cadmind_einstein.*"]
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+addopts = ["--strict-markers", "--strict-config", "-ra"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+extend-exclude = [".venv"]
+
+[tool.ruff.lint]
+select = [
+    "F", "E", "W", "I", "B", "A", "C4", "DTZ", "ISC", "LOG", "G", "N", "PIE", "PTH", "Q", "RET",
+    "RUF", "S", "SIM", "SLF", "BLE", "ARG", "T20", "UP", "PLC", "PLE", "PLW",
+]
+ignore = ["ISC001", "UP040", "UP047"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["S101", "SLF001", "PLC0415", "ARG001", "ARG002", "ARG005", "T201"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["cadmind_einstein"]
