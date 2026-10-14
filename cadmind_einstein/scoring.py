@@ -506,17 +506,18 @@ def main(argv: list[str] | None = None) -> int:
     the newest one is what the validator committed on chain."""
     import argparse  # noqa: PLC0415
 
+    from .cli import add_subtensor_args, network_of  # noqa: PLC0415
+
     ap = argparse.ArgumentParser(prog="cadmind-recompute")
     ap.add_argument("reports", nargs="+", type=Path, help="hour-N.json, oldest first")
     ap.add_argument("--expect-sha256", default="", help="the newest report's committed hash")
-    ap.add_argument("--network", default="", help="read the committed hash from this chain")
-    ap.add_argument("--netuid", type=int, default=0)
+    add_subtensor_args(ap, network_default="")  # empty: no chain read
     ap.add_argument("--validator-hotkey", default="")
     ap.add_argument("--block", type=int, default=None, help="read the commitment at this block")
     a = ap.parse_args(argv if argv is not None else sys.argv[1:])
     expect = a.expect_sha256.lower().removeprefix("0x")
-    if a.network:
-        expect = onchain_sha256(a.network, a.netuid, a.validator_hotkey, a.block)
+    if network_of(a):
+        expect = onchain_sha256(network_of(a), a.netuid, a.validator_hotkey, a.block)
         if not expect:
             print("no sha256 commitment found for that hotkey", file=sys.stderr)  # noqa: T201
             return 1

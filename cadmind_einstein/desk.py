@@ -71,6 +71,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import logging
 import random
 import secrets
 import statistics
@@ -518,8 +519,8 @@ class Desk:
             self._futures.discard(fut)
         if not fut.cancelled() and fut.exception() is not None:
             err = fut.exception()
-            print(  # noqa: T201 -- the daemon's log
-                f"[cadmind-einstein] desk worker: {type(err).__name__}: {err}", flush=True
+            logging.getLogger("cadmind_einstein.desk").error(
+                "desk worker: %s: %s", type(err).__name__, err
             )
 
     def wait_idle(self, timeout: float = 10.0) -> bool:

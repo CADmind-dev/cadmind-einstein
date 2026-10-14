@@ -4,7 +4,7 @@ from the clients' signals, hourly weights and hourly reports.
     python -m cadmind_einstein.daemon --state-dir DIR --token-file T \\
         --platform https://cadmind.ai --operator-key-file K \\
         [--mint-key-file M --queue-key-file Q] \\
-        --wallet-name v --wallet-hotkey h --network test --netuid N [--dry-run-weights]
+        --wallet.name v --wallet.hotkey h --subtensor.network test --netuid N [--dry-run-weights]
     # a local stack: a development key and a fixed metagraph (always a dry run)
     python -m cadmind_einstein.daemon --state-dir DIR --token-file T \\
         --platform http://127.0.0.1:PORT --operator-key-file K \\
@@ -45,6 +45,13 @@ queue keys are probed: a key that does not hold its role stops the daemon. A rol
 at its ceiling is stopped (ALERT in the log, re-checked every 5 minutes); results to return wait in
 the store meanwhile.
 
+Flags follow Bittensor's names (``--wallet.name``, ``--wallet.hotkey``, ``--wallet.path``,
+``--subtensor.network``, ``--subtensor.chain_endpoint``, ``--netuid``, ``--logging.debug``,
+``--logging.trace``); the dashed names of earlier releases (``--wallet-name``, ``--wallet-hotkey``,
+``--network``) remain aliases (:mod:`.cli`). Weights carry the package's ``__spec_version__`` as
+their ``version_key``; at startup and daily the latest GitHub release is read and a newer one is
+logged as a WARNING (``--no-version-check`` turns that off; :mod:`.version`).
+
 The HTTP face listens on 127.0.0.1 by default; in production nginx stands in front (TLS, body
 size, header and body timeouts, ``limit_conn``/``limit_req``) and is named with
 ``--trusted-proxy`` so its ``X-Real-IP`` is what the per-address limits count.
@@ -53,12 +60,15 @@ size, header and body timeouts, ``limit_conn``/``limit_req``) and is named with
 from __future__ import annotations
 
 import argparse
+import logging
 import sys
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from . import __spec_version__, __version__
 from .chain import (
     ChainCommitter,
     ChainWeights,
@@ -69,12 +79,24 @@ from .chain import (
     SubtensorReader,
     dominance,
 )
+from .cli import (
+    add_logging_args,
+    add_subtensor_args,
+    add_version_args,
+    add_wallet_args,
+    network_of,
+    setup_logging,
+    wallet_kwargs,
+)
 from .desk import AbusePolicy, Desk, SecondOpinion
 from .platform import OperatorClient, PlatformError
 from .scoring import GENESIS, Ledger
 from .service import serve
 from .similarity import CopyPolicy, load_corpus
 from .store import Store
+from .version import check_latest
+
+log = logging.getLogger("cadmind_einstein.daemon")
 
 
 def read_key(path: Path, *, strict: bool = True) -> str:
@@ -92,11 +114,13 @@ def read_key(path: Path, *, strict: bool = True) -> str:
 
 
 def _log(line: str) -> None:
-    print(f"[cadmind-einstein] {line}", file=sys.stderr, flush=True)  # noqa: T201 -- the daemon's log
+    log.info(line)
 
 
-def main(argv: list[str] | None = None) -> int:
+def parser() -> argparse.ArgumentParser:
+    """The validator's flags (Bittensor's names, with the earlier dashed names as aliases)."""
     ap = argparse.ArgumentParser(prog="cadmind-einstein")
+    add_version_args(ap)
     ap.add_argument("--state-dir", type=Path, required=True)
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8793)
@@ -117,11 +141,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--queue-key-file", type=Path, help="the queue role's key (default: the operator key)"
     )
-    ap.add_argument("--wallet-name")
-    ap.add_argument("--wallet-hotkey")
+    add_wallet_args(ap, help_name="the bittensor wallet holding the validator's hotkey")
     ap.add_argument("--dev-uri", help="a development key (//Validator): local runs only")
-    ap.add_argument("--network", default="test")
-    ap.add_argument("--netuid", type=int, default=0)
+    add_subtensor_args(ap, network_default="test")
+    add_logging_args(ap)
     ap.add_argument("--metagraph-file", type=Path, help="a local stack: JSON list of hotkeys")
     ap.add_argument("--owner-hotkey", default="", help="never weighted (default: the chain's)")
     ap.add_argument(
@@ -208,7 +231,27 @@ def main(argv: list[str] | None = None) -> int:
     )
     ap.add_argument("--max-connections", type=int, default=64)
     ap.add_argument("--max-connections-per-ip", type=int, default=16)
-    a = ap.parse_args(argv)
+    return ap
+
+
+def version_watch(say: Callable[[str], None], every_s: float = 86400.0) -> None:
+    """Read the latest release now and every ``every_s`` after (a daemon thread); a newer release
+    is said as a WARNING. Reads a version string only -- it never downloads or runs anything."""
+
+    def run() -> None:
+        while True:
+            check_latest(say=say)
+            time.sleep(every_s)
+
+    threading.Thread(target=run, name="version-check", daemon=True).start()
+
+
+def main(argv: list[str] | None = None) -> int:
+    a = parser().parse_args(argv)
+    setup_logging(a, prefix="[cadmind-einstein]")
+    _log(f"cadmind-einstein {__version__} (spec {__spec_version__})")
+    if not a.no_version_check:
+        version_watch(_log)
 
     a.state_dir.mkdir(parents=True, exist_ok=True)
     subtensor: Any = None
@@ -220,14 +263,14 @@ def main(argv: list[str] | None = None) -> int:
     else:
         import bittensor as bt  # noqa: PLC0415
 
-        wallet = bt.Wallet(name=a.wallet_name, hotkey=a.wallet_hotkey)
+        wallet = bt.Wallet(**wallet_kwargs(a))
         me = str(wallet.hotkey.ss58_address)
     if a.metagraph_file:
         chain = LiveChain(FileReader(a.metagraph_file, a.netuid))
     else:
         import bittensor as bt  # noqa: PLC0415
 
-        subtensor = bt.Subtensor(network=a.network)
+        subtensor = bt.Subtensor(network=network_of(a))
         chain = LiveChain(SubtensorReader(subtensor, a.netuid))
     dry = a.dry_run_weights or subtensor is None or bool(a.dev_uri)
     owner = a.owner_hotkey or chain.state.owner_hotkey
@@ -310,7 +353,7 @@ def main(argv: list[str] | None = None) -> int:
     if dry:
         weights, commits = DryRunWeights(), DryRunCommitter()
     else:
-        weights = ChainWeights(subtensor, wallet, chain, me=me)
+        weights = ChainWeights(subtensor, wallet, chain, me=me, version_key=__spec_version__)
         commits = ChainCommitter(subtensor, wallet, a.netuid, on_committed=committed)
 
     said = {"dominance": ""}
@@ -378,6 +421,11 @@ def main(argv: list[str] | None = None) -> int:
                 if time.monotonic() - last_sync > a.sync_s:
                     last_sync = time.monotonic()
                     if chain.sync():
+                        log.debug(
+                            "metagraph read: block %s, %d hotkey(s)",
+                            chain.state.block,
+                            len(chain.hotkeys),
+                        )
                         gone = desk.sync_registered(chain.hotkeys)
                         if gone:
                             _log(f"deregistered on the subnet: {len(gone)} miner(s); keys revoked")

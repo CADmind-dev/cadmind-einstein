@@ -273,8 +273,10 @@ execution, decentralised verification*: hourly public reports, open-source scori
 commitments let anyone check the weights.
 
 Weights are set with `bt.SetWeights`, which takes the plain or the timelocked commit-reveal path according to the
-subnet's hyperparameters, inside `weights_rate_limit`, with the subnet's `weights_version`. `--dry-run-weights`
-makes no chain write at all (vector and report hash are logged).
+subnet's hyperparameters, inside `weights_rate_limit`. The weights carry the validator's spec version
+(`cadmind_einstein.__spec_version__`, derived from the package version) as their `version_key`, so the subnet's
+`weights_version` hyperparameter can require a minimum validator release; the validator warns when it is older.
+`--dry-run-weights` makes no chain write at all (vector and report hash are logged).
 
 ## 11. Abuse, secrecy and the HTTP face
 

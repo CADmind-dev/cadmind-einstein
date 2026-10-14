@@ -11,7 +11,7 @@ configures and pays for its own model and CLI: this program passes no credential
 assumes no particular plan. **Follow your model provider's terms** -- many consumer plans do not
 allow automated or commercial use.
 
-    cadmind-einstein-miner --wallet-name miner --wallet-hotkey m1 \\
+    cadmind-einstein-miner --wallet.name miner --wallet.hotkey m1 \\
         --validator https://VALIDATOR --validator-hotkey 5... \\
         --platform https://cadmind.ai --state ~/.local/share/cadmind-einstein-miner \\
         [--agent-cli claude] [--model MODEL] [--agent-arg ARG ...]
@@ -24,6 +24,13 @@ Placeholders in ``--agent-command``: ``{prompt_file}``, ``{mcp_config}`` (a stan
 ``mcpServers`` JSON file naming the ``cadmind-watt`` server, mode 0600), ``{model}``,
 ``{workspace}`` and ``{job}``. The agent's last line must be ``DONE <digest>`` or
 ``REJECT <not-allowed|not-capable>: <message for the client>``.
+
+Flags follow Bittensor's names (``--wallet.name``, ``--wallet.hotkey``, ``--wallet.path``,
+``--logging.debug``, ``--logging.trace``; the dashed ``--wallet-name``/``--wallet-hotkey`` remain
+aliases). With ``--netuid`` (and ``--subtensor.network``/``--subtensor.chain_endpoint``) the miner
+reads the metagraph once at startup and warns when its hotkey is not registered there; without
+``--netuid`` it makes no chain call. A newer GitHub release is logged as a WARNING at startup
+(``--no-version-check`` turns that off).
 """
 
 from __future__ import annotations
@@ -31,6 +38,7 @@ from __future__ import annotations
 import argparse
 import base64
 import json
+import logging
 import os
 import re
 import shlex
@@ -41,8 +49,19 @@ import time
 from pathlib import Path
 from typing import Any
 
+from . import __spec_version__, __version__
+from .cli import (
+    add_logging_args,
+    add_subtensor_args,
+    add_version_args,
+    add_wallet_args,
+    network_of,
+    setup_logging,
+    wallet_kwargs,
+)
 from .fake_miner import signed
 from .sealing import new_keypair, open_sealed
+from .version import check_latest
 
 MCP_SERVER = "cadmind-watt"
 
@@ -112,10 +131,23 @@ def agent_argv(
     return argv + list(a.agent_arg)
 
 
-def main(argv: list[str] | None = None) -> int:
+def registered_on(network: str, netuid: int, hotkey: str) -> bool:
+    """Whether ``hotkey`` is in the subnet's metagraph (one read)."""
+    import bittensor as bt  # noqa: PLC0415
+
+    from .chain import SubtensorReader  # noqa: PLC0415
+
+    state = SubtensorReader(bt.Subtensor(network=network), netuid).read()
+    return state.by_hotkey(hotkey) is not None
+
+
+def parser() -> argparse.ArgumentParser:
+    """The miner's flags (Bittensor's names, with the earlier dashed names as aliases)."""
     ap = argparse.ArgumentParser(prog="cadmind-einstein-miner")
-    ap.add_argument("--wallet-name", help="the bittensor wallet holding the miner's hotkey")
-    ap.add_argument("--wallet-hotkey")
+    add_version_args(ap)
+    add_wallet_args(ap, help_name="the bittensor wallet holding the miner's hotkey")
+    add_subtensor_args(ap, network_default="finney", netuid_default=0)
+    add_logging_args(ap)
     ap.add_argument("--dev-uri", help="a development key (//Alice): local stacks only")
     ap.add_argument("--validator", required=True, help="the validator's base URL")
     ap.add_argument("--validator-hotkey", required=True, help="the validator's SS58 hotkey")
@@ -127,6 +159,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--agent-command", default="", help="any agent CLI: an argv template")
     ap.add_argument("--prompt-file", type=Path, help="a prompt template replacing the built-in one")
     ap.add_argument("--max-jobs", type=int, default=0, help="0: run forever")
+    return ap
+
+
+def main(argv: list[str] | None = None) -> int:
+    ap = parser()
     a = ap.parse_args(argv)
 
     if a.dev_uri:
@@ -135,11 +172,13 @@ def main(argv: list[str] | None = None) -> int:
         kp: Any = Keypair.create_from_uri(a.dev_uri)
     else:
         if not (a.wallet_name and a.wallet_hotkey):
-            ap.error("--wallet-name and --wallet-hotkey (or --dev-uri) are required")
+            ap.error("--wallet.name and --wallet.hotkey (or --dev-uri) are required")
         import bittensor as bt  # noqa: PLC0415
 
-        kp = bt.Wallet(name=a.wallet_name, hotkey=a.wallet_hotkey).hotkey
+        kp = bt.Wallet(**wallet_kwargs(a)).hotkey
     me = kp.ss58_address
+    setup_logging(a, prefix=f"[einstein-miner {me[:8]}]", stream=sys.stdout)
+    logger = logging.getLogger("cadmind_einstein.miner")
     template = a.prompt_file.read_text(encoding="utf-8") if a.prompt_file else PROMPT
     a.state.mkdir(parents=True, exist_ok=True)
     a.state.chmod(0o700)
@@ -149,7 +188,20 @@ def main(argv: list[str] | None = None) -> int:
     work_dir.mkdir(exist_ok=True)
 
     def log(msg: str) -> None:
-        print(f"[einstein-miner {me[:8]}] {time.strftime('%H:%M:%S')} {msg}", flush=True)  # noqa: T201
+        logger.info("%s %s", time.strftime("%H:%M:%S"), msg)
+
+    log(f"cadmind-einstein-miner {__version__} (spec {__spec_version__})")
+    if not a.no_version_check:
+        check_latest(say=log)
+    if a.netuid and not a.dev_uri:
+        try:
+            if not registered_on(network_of(a), a.netuid, me):
+                log(
+                    f"WARNING: hotkey {me} is not registered on netuid {a.netuid} "
+                    f"({network_of(a)}): the validator will refuse it"
+                )
+        except Exception as e:  # noqa: BLE001 -- a startup hint only, never fatal
+            log(f"registration check skipped: {type(e).__name__}: {e}")
 
     def call(path: str, body: dict[str, Any]) -> tuple[int, Any]:
         return signed(kp, a.validator, path, body, a.validator_hotkey)

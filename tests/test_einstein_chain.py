@@ -18,6 +18,7 @@ from typing import Any
 import bittensor.http_auth as btauth
 from bittensor.sp_core import Keypair
 
+from cadmind_einstein import __spec_version__
 from cadmind_einstein.chain import (
     ChainCommitter,
     ChainState,
@@ -229,7 +230,8 @@ class TestWeights(unittest.TestCase):
         self.chain.sync()
         self.assertEqual(self.w.pump(), "set")
         self.assertEqual(
-            self.calls, [{"netuid": 7, "uids": [2], "weights": [65535], "version_key": 3}]
+            self.calls,
+            [{"netuid": 7, "uids": [2], "weights": [65535], "version_key": __spec_version__}],
         )
         self.assertIsNone(self.w.pending)
         self.assertEqual(self.w.pump(), "nothing pending")
@@ -249,7 +251,7 @@ class TestWeights(unittest.TestCase):
 
     def test_the_sdk_intent_picks_the_commit_reveal_path(self) -> None:
         """No factory: the real ``bt.SetWeights`` intent is built (and handed to the fake client,
-        which writes nothing). Built with the subnet's weights version."""
+        which writes nothing). Built with the package's spec version as the version key."""
         import bittensor as bt
 
         self.src.st = state(block=20_000, my_last=9_950)
@@ -259,7 +261,29 @@ class TestWeights(unittest.TestCase):
         self.assertEqual(w.pump(), "set")
         intent = self.sub.executed[-1]
         self.assertIsInstance(intent, bt.SetWeights)
-        self.assertEqual((intent.netuid, list(intent.uids), intent.version_key), (7, [2, 3], 3))
+        self.assertEqual(
+            (intent.netuid, list(intent.uids), intent.version_key), (7, [2, 3], __spec_version__)
+        )
+
+    def test_a_subnet_requiring_a_newer_weights_version_is_warned_about(self) -> None:
+        """The subnet's ``weights_version`` above our spec: the chain would refuse the weights;
+        the validator says so (and still sends its own spec version, never the chain's)."""
+        out = io.StringIO()
+        self.src.st = state(block=20_000, my_last=9_950)
+        self.chain.sync()
+        w = ChainWeights(
+            self.sub,
+            object(),
+            self.chain,
+            me=ME,
+            call_factory=lambda **kw: self.calls.append(kw) or kw,
+            stderr=out,
+            version_key=2,
+        )
+        w.submit([(2, 65535)], hour=1)
+        w.pump()
+        self.assertIn("requires weights version 3", out.getvalue())
+        self.assertEqual(self.calls[-1]["version_key"], 2)
 
     def test_nothing_to_weight_sets_nothing(self) -> None:
         self.w.submit([(0, 65535)], hour=1)  # only the owner: dropped, nothing left

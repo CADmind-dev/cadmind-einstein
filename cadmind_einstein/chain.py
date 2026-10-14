@@ -34,11 +34,13 @@ claims a dominance it does not have.
 from __future__ import annotations
 
 import json
-import sys
+import logging
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import IO, Any
+
+from . import __spec_version__
 
 DEFAULT_KAPPA = 0.5
 DEFAULT_ACTIVITY_CUTOFF = 5000
@@ -217,7 +219,10 @@ def dominance(state: ChainState, me: str) -> dict[str, Any]:
 
 
 def _log_to(stream: IO[str] | None) -> Callable[[str], None]:
-    out = stream if stream is not None else sys.stderr
+    """The ``cadmind_einstein.chain`` logger, or (tests) lines written to ``stream``."""
+    if stream is None:
+        return logging.getLogger("cadmind_einstein.chain").info
+    out = stream
 
     def log(line: str) -> None:
         out.write(f"[cadmind-einstein] {line}\n")
@@ -262,6 +267,10 @@ class ChainWeights:
     snapshot, re-read after a set). A refusal keeps it pending and is logged once per distinct
     reason. ``current_block`` defaults to the snapshot's block (the snapshot is re-read every few
     minutes); pass the client's block read for a fresher answer.
+
+    The weights carry ``version_key`` -- the package's ``__spec_version__`` -- so the subnet's
+    ``weights_version`` hyperparameter can require a minimum validator release; when it requires
+    more than this code is, a WARNING says so (the chain refuses the weights).
     """
 
     def __init__(
@@ -274,8 +283,10 @@ class ChainWeights:
         call_factory: Callable[..., Any] | None = None,
         current_block: Callable[[], int] | None = None,
         stderr: IO[str] | None = None,
+        version_key: int = __spec_version__,
     ) -> None:
         self.subtensor, self.wallet, self.chain, self.me = subtensor, wallet, chain, me
+        self.version_key = version_key
         self.call_factory = call_factory
         self.current_block = current_block
         self.log = _log_to(stderr)
@@ -320,7 +331,13 @@ class ChainWeights:
             return f"rate limit: {wait} block(s) to wait"
         vec = guard(self.pending, state, me=self.me)
         uids, weights = [u for u, _ in vec], [w for _, w in vec]
-        version = int(state.hyper.get("weights_version") or 0)
+        version = self.version_key
+        required = int(state.hyper.get("weights_version") or 0)
+        if required > version:
+            self._say(
+                f"WARNING: the subnet requires weights version {required} but this validator is "
+                f"spec {version}: the chain will refuse its weights -- update the validator"
+            )
         path = "commit-reveal" if state.commit_reveal() else "plain"
         try:
             result = self.subtensor.execute(
