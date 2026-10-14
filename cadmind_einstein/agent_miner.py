@@ -71,8 +71,9 @@ PROMPT = """You are a CADmind einstein miner. Build this client's device in the 
 Start with `watt_guide` (brief, then primer, then scope). Work fast and carefully:
 1. First write DESIGN-NOTES.md: how the device is made, installed, used and serviced, what can go \
 wrong at each step and the requirement/test proving it does not; every critical number sourced \
-(`fetch` into the project's assets/), never invented. Fetch only what the first sketch needs, then \
-build.
+(`fetch` into the project's assets/), never invented. Prefer the maker's own product page, \
+datasheet or manual over retailer listings; a site that blocks automated fetches answers at once: \
+move on. Fetch only what the first sketch needs, then build.
 2. Iterate with check / build / test; edit files, never rewrite them whole; run the full `test` \
 with mutate once at the end (`watt_wait`), only after a passing scoped guard (mutate with several \
 `only`, one run) covering every must requirement, never as a first check.
