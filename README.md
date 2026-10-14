@@ -1,6 +1,6 @@
 # cadmind-einstein
 
-[![CI](https://github.com/CADmind-dev/cadmind-einstein/actions/workflows/ci.yml/badge.svg)](https://github.com/CADmind-dev/cadmind-einstein/actions/workflows/ci.yml)
+[![CI](https://github.com/cadmindai/cadmind-einstein/actions/workflows/ci.yml/badge.svg)](https://github.com/cadmindai/cadmind-einstein/actions/workflows/ci.yml)
 [![License: Unlicense](https://img.shields.io/badge/license-Unlicense-blue.svg)](LICENSE)
 
 The Bittensor subnet of [CADmind](https://cadmind.ai)'s **einstein** engine: real client devices, designed by
@@ -140,7 +140,7 @@ commercial use). An efficient harness -- fewer, better model calls and less Watt
 ## Install and test
 
 ```bash
-git clone https://github.com/CADmind-dev/cadmind-einstein.git
+git clone https://github.com/cadmindai/cadmind-einstein.git
 cd cadmind-einstein
 python3.12 -m venv .venv
 .venv/bin/pip install -e '.[test]'

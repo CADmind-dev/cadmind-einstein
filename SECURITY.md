@@ -4,7 +4,7 @@
 
 Please report security issues **privately** through GitHub's private vulnerability reporting for this repository:
 open the repository's **Security** tab and choose **Report a vulnerability**
-(<https://github.com/CADmind-dev/cadmind-einstein/security/advisories/new>).
+(<https://github.com/cadmindai/cadmind-einstein/security/advisories/new>).
 
 Do not open a public issue or pull request for a vulnerability, and do not exploit it on the live subnet beyond
 what is needed to demonstrate it.

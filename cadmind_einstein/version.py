@@ -19,7 +19,7 @@ from collections.abc import Callable
 
 from . import __spec_version__, __version__, _spec
 
-RELEASES_URL = "https://api.github.com/repos/CADmind-dev/cadmind-einstein/releases/latest"
+RELEASES_URL = "https://api.github.com/repos/cadmindai/cadmind-einstein/releases/latest"
 _TAG = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)$")
 
 log = logging.getLogger("cadmind_einstein.version")
