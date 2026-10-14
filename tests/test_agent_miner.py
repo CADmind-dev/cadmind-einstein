@@ -32,11 +32,15 @@ class TestAgentArgv(unittest.TestCase):
             job="job-1",
         )
 
-    def test_default_is_restricted_to_the_watt_mcp_server_and_names_no_model(self) -> None:
+    def test_default_is_restricted_to_the_mcp_tools_and_names_no_model(self) -> None:
         argv = self.call(ns())
         self.assertEqual(argv[:3], ["claude", "-p", "P"])
         self.assertIn("--strict-mcp-config", argv)
-        self.assertEqual(argv[argv.index("--allowedTools") + 1], "mcp__cadmind-watt")
+        # the Watt MCP server's tools and the one local fetch tool (tests/test_fetch_mcp.py)
+        self.assertEqual(
+            argv[argv.index("--allowedTools") + 1],
+            "mcp__cadmind-watt,mcp__cadmind-fetch__fetch_to_workspace",
+        )
         self.assertNotIn("--model", argv)
 
     def test_model_and_extra_arguments_are_the_operators(self) -> None:

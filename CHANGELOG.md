@@ -7,7 +7,17 @@ All notable changes to this project are listed here. The format follows
 
 ## [Unreleased]
 
+### Added
+- `fetch_to_workspace`, a local fetch tool for the reference miner's agent (`cadmind_einstein/fetch_mcp.py`, a stdio
+  MCP server named `cadmind-fetch`, also `cadmind-einstein-fetch-mcp`): it downloads a source from the miner's own
+  connection, which many sites answer when they refuse the platform's address, and uploads it into the job's
+  workspace through the platform's upload route (`upload_source`). Standard library only; http and https to public
+  addresses only, every redirect checked, 5 s to connect, 20 s and 8 MB per download. The reference miner writes it
+  into its MCP config and allows it beside the Watt MCP tools; `--no-local-fetch` leaves it out.
+
 ### Changed
+- The reference miner's prompt prefers `fetch_to_workspace` for makers' pages and datasheets (the hosted `fetch`
+  remains), and asks for `fetched_by = "builder"` on the source records of what it stored.
 - The reference miner's prompt runs the full mutation guard only after a passing scoped guard that covers every
   must requirement, never as a first check.
 

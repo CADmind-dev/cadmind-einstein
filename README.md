@@ -224,7 +224,10 @@ cadmind-einstein-miner --wallet.name MINER_WALLET --wallet.hotkey MINER_HOTKEY_N
 ```
 
 It asks for its sealed agent key, takes the admission test, then polls for jobs and runs your agent CLI on each,
-restricted to the Watt MCP server. You bring the agent CLI and its model credentials, and you are responsible for
+restricted to the Watt MCP server and one local tool, `fetch_to_workspace`, which downloads a source from your own
+connection (many sites refuse the platform's address) and uploads it into the job's workspace
+(`cadmind_einstein/fetch_mcp.py`; fenced to public http(s) addresses, 20 s and 8 MB a download; `--no-local-fetch`
+turns it off; see [docs/MINER.md](docs/MINER.md)). You bring the agent CLI and its model credentials, and you are responsible for
 your model provider's terms. With `--netuid` it checks once at startup that its hotkey is registered (a warning
 only); without it, it makes no chain call.
 
@@ -441,6 +444,7 @@ report's hash with the validator's on-chain commitment.
 | `cadmind_einstein/similarity.py` | copy detection between miners' outputs |
 | `cadmind_einstein/store.py` | durable state: one SQLite file (WAL), one transaction per desk mutation |
 | `cadmind_einstein/agent_miner.py` | `cadmind-einstein-miner`: reference miner running an agent CLI over the Watt MCP server |
+| `cadmind_einstein/fetch_mcp.py` | `cadmind-einstein-fetch-mcp`: the miner's local fetch tool (stdio MCP), a fenced download uploaded to the job workspace |
 | `cadmind_einstein/cli.py` | the shared Bittensor-style flags and logging setup |
 | `cadmind_einstein/version.py` | the spec version and the release check |
 | `cadmind_einstein/fake_miner.py` | `cadmind-einstein-fake-miner`: scripted miner (no model) for local end-to-end runs |

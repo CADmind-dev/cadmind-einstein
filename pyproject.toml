@@ -30,6 +30,7 @@ cadmind-einstein = "cadmind_einstein.daemon:main"
 cadmind-recompute = "cadmind_einstein.scoring:main"
 cadmind-einstein-miner = "cadmind_einstein.agent_miner:main"
 cadmind-einstein-fake-miner = "cadmind_einstein.fake_miner:main"
+cadmind-einstein-fetch-mcp = "cadmind_einstein.fetch_mcp:main"
 
 [tool.setuptools.dynamic]
 version = { attr = "cadmind_einstein.__version__" }

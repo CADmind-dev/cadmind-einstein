@@ -21,9 +21,15 @@ allow automated or commercial use.
         --agent-command 'my-agent --mcp {mcp_config} --prompt-file {prompt_file}'
 
 Placeholders in ``--agent-command``: ``{prompt_file}``, ``{mcp_config}`` (a standard
-``mcpServers`` JSON file naming the ``cadmind-watt`` server, mode 0600), ``{model}``,
+``mcpServers`` JSON file naming the ``cadmind-watt`` server and the local ``cadmind-fetch`` server,
+mode 0600), ``{model}``,
 ``{workspace}`` and ``{job}``. The agent's last line must be ``DONE <digest>`` or
 ``REJECT <not-allowed|not-capable>: <message for the client>``.
+
+The agent also gets one local tool, ``fetch_to_workspace`` (:mod:`.fetch_mcp`, a stdio MCP server
+named ``cadmind-fetch``): it downloads a public document from the miner's own connection (many sites
+refuse the platform's address) and uploads it into the job's workspace, as the hosted ``fetch``
+stores one. It is a fenced download, not a shell; ``--no-local-fetch`` leaves it out.
 
 Flags follow Bittensor's names (``--wallet.name``, ``--wallet.hotkey``, ``--wallet.path``,
 ``--logging.debug``, ``--logging.trace``; the dashed ``--wallet-name``/``--wallet-hotkey`` remain
@@ -60,20 +66,27 @@ from .cli import (
     wallet_kwargs,
 )
 from .fake_miner import signed
+from .fetch_mcp import SERVER_NAME as FETCH_SERVER
+from .fetch_mcp import TOOL as FETCH_TOOL
+from .fetch_mcp import server_config as fetch_server_config
 from .sealing import new_keypair, open_sealed
 from .version import check_latest
 
 MCP_SERVER = "cadmind-watt"
 
 PROMPT = """You are a CADmind einstein miner. Build this client's device in the Watt workspace \
-`{ws}` (made from the brief), using ONLY the {server} MCP tools.
+`{ws}` (made from the brief), using ONLY the {server} MCP tools (and the local \
+`fetch_to_workspace` tool when it is there).
 
 Start with `watt_guide` (brief, then primer, then scope). Work fast and carefully:
 1. First write DESIGN-NOTES.md: how the device is made, installed, used and serviced, what can go \
 wrong at each step and the requirement/test proving it does not; every critical number sourced \
-(`fetch` into the project's assets/), never invented. Prefer the maker's own product page, \
-datasheet or manual over retailer listings; a site that blocks automated fetches answers at once: \
-move on. Fetch only what the first sketch needs, then build.
+(fetched into the project's assets/), never invented. Prefer the maker's own product page, \
+datasheet or manual over retailer listings. Fetch maker pages and datasheets with \
+`fetch_to_workspace` when you have it (it downloads from this builder's own connection, which many \
+sites that block the hosted `fetch` answer; its source records add fetched_by = "builder"); the \
+hosted `fetch` remains available. A site that blocks both: move on. Fetch only what the first \
+sketch needs, then build.
 2. Iterate with check / build / test; edit files, never rewrite them whole; run the full `test` \
 with mutate once at the end (`watt_wait`), only after a passing scoped guard (mutate with several \
 `only`, one run) covering every must requirement, never as a first check.
@@ -124,13 +137,37 @@ def agent_argv(
         str(mcp_file),
         "--strict-mcp-config",
         "--allowedTools",
-        f"mcp__{MCP_SERVER}",
+        allowed_tools(a),
         "--output-format",
         "text",
     ]
     if a.model:
         argv += ["--model", a.model]
     return argv + list(a.agent_arg)
+
+
+def allowed_tools(a: argparse.Namespace) -> str:
+    """Claude Code's ``--allowedTools``: the Watt MCP server's tools, and the local fetch tool."""
+    tools = [f"mcp__{MCP_SERVER}"]
+    if getattr(a, "local_fetch", True):
+        tools.append(f"mcp__{FETCH_SERVER}__{FETCH_TOOL}")
+    return ",".join(tools)
+
+
+def mcp_config(a: argparse.Namespace, key: str, key_file: Path) -> dict[str, Any]:
+    """The agent's ``mcpServers``: the platform's Watt server, and the local fetch server (unless
+    ``--no-local-fetch``), which reads the agent key from ``key_file``."""
+    servers: dict[str, Any] = {
+        MCP_SERVER: {
+            "type": "http",
+            "url": a.platform.rstrip("/") + "/mcp",
+            "headers": {"Authorization": f"Bearer {key}"},
+        }
+    }
+    if getattr(a, "local_fetch", True):
+        # absolute: the agent (and so the server) runs in the empty work directory
+        servers[FETCH_SERVER] = fetch_server_config(a.platform.rstrip("/"), key_file.resolve())
+    return {"mcpServers": servers}
 
 
 def registered_on(network: str, netuid: int, hotkey: str) -> bool:
@@ -161,6 +198,12 @@ def parser() -> argparse.ArgumentParser:
     ap.add_argument("--agent-command", default="", help="any agent CLI: an argv template")
     ap.add_argument("--prompt-file", type=Path, help="a prompt template replacing the built-in one")
     ap.add_argument("--max-jobs", type=int, default=0, help="0: run forever")
+    ap.add_argument(
+        "--no-local-fetch",
+        dest="local_fetch",
+        action="store_false",
+        help="no local fetch_to_workspace tool: the agent fetches through the platform only",
+    )
     return ap
 
 
@@ -221,16 +264,7 @@ def main(argv: list[str] | None = None) -> int:
         key = open_sealed(got["sealed"], priv, me)
         _write_private(key_file, key + "\n")
         log(f"agent key {got['key_id']} opened and stored")
-    cfg = {
-        "mcpServers": {
-            MCP_SERVER: {
-                "type": "http",
-                "url": a.platform.rstrip("/") + "/mcp",
-                "headers": {"Authorization": f"Bearer {key}"},
-            }
-        }
-    }
-    _write_private(mcp_file, json.dumps(cfg))
+    _write_private(mcp_file, json.dumps(mcp_config(a, key, key_file)))
 
     code, adm = call("/v1/miners/admission", {})
     log(f"admission requested: {code} {adm.get('job') if isinstance(adm, dict) else adm}")
