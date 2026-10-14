@@ -573,7 +573,9 @@ class Desk:
             if e.code == SUSPENDED:
                 self._suspended(hotkey)
                 raise DeskError("this hotkey is suspended from the Watt agent API", 403) from None
-            raise
+            # The platform cannot mint now (our key frozen or refused, busy, unreachable): the
+            # miner asks again later.
+            raise DeskError("the validator cannot mint a key now; retry later", 503) from None
         with self._mut():
             if hotkey not in set(self.registered()):  # deregistered while the key was minted
                 self._queue_revoke(hotkey)
@@ -1600,7 +1602,7 @@ class Desk:
                 self._retry_at[job.job] = time.monotonic() + 30.0
             return
         except PlatformError as e:
-            busy = e.code in OURS_BUSY
+            busy = e.code in OURS_BUSY or e.ours  # our credential or the platform's load
             if e.status == 0 or e.status >= 500 or busy:
                 with self._lock:
                     a.outcome = f"judging retried: {str(e)[:200]}"

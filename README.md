@@ -53,8 +53,11 @@ The tests run in process against an in-memory platform and fakes of the bittenso
 A validator needs:
 
 1. **A registered hotkey with a validator permit** on the subnet (`btcli subnet register`, then stake).
-2. **An operator agent key** issued by CADmind: the platform accepts operator routes (mint miner keys, grant,
-   freeze and fork job workspaces, claim jobs) only from this key. Store it in a 0600 file.
+2. **Operator agent keys** issued by CADmind, one per role: the **operator** key (grant, freeze and fork job
+   workspaces, and run `watt` in the validator's own forks), the **mint** key (mint and disable miners' keys) and
+   the **queue** key (claim, lease and complete jobs; a delivered result charges the client). Each reaches only its
+   own routes. Store each in a 0600 file. With one key only, pass just `--operator-key-file`: the others fall
+   back to it.
 3. **A desk token**: a random secret the platform uses for the Bearer routes (signals, cancel, capacity). Store it
    in a 0600 file and give it to CADmind.
 
@@ -63,6 +66,8 @@ cadmind-einstein --state-dir ~/.local/share/cadmind-einstein \
     --token-file ~/.config/cadmind-einstein/desk.token \
     --platform https://cadmind.ai \
     --operator-key-file ~/.config/cadmind-einstein/operator.key \
+    --mint-key-file ~/.config/cadmind-einstein/mint.key \
+    --queue-key-file ~/.config/cadmind-einstein/queue.key \
     --wallet-name VALIDATOR_WALLET --wallet-hotkey VALIDATOR_HOTKEY_NAME \
     --network test --netuid NETUID \
     --dry-run-weights
@@ -143,11 +148,21 @@ Every answer on these routes is signed by the validator's hotkey (`X-Einstein-Va
 
 ### What the validator calls on the platform
 
-With its operator key: `POST /api/agent/subnet/keys` (mint), `.../keys/disable`, `.../workspaces` (grant),
-`.../workspaces/{ws}` (state), `.../freeze`, `.../fork`; `POST /api/engine/einstein/claim`, `lease`,
-`GET .../claimed`, `POST .../jobs/{job}/result`; and in its own forks the ordinary agent routes
-(`/api/agent/workspaces/{ws}/run` for `watt status` and the gate's `watt test --mutate`, `/export`). See
-`cadmind_einstein/platform.py`.
+With its mint key: `POST /api/agent/subnet/keys` (mint), `.../keys/disable`. With its operator key:
+`.../workspaces` (grant), `.../workspaces/{ws}` (state), `.../freeze`, `.../fork`, and in its own forks the
+ordinary agent routes (`/api/agent/workspaces/{ws}/run` for `watt status` and the gate's `watt test --mutate`,
+`/export`). With its queue key: `POST /api/engine/einstein/claim`, `lease`, `GET .../claimed`,
+`POST .../jobs/{job}/result`. See `cadmind_einstein/platform.py`.
+
+- At startup the operator and queue keys are checked (the mint key on its first use); a key that does not hold
+  its role (403 `operator_role`) or is refused (401: a wrong key, or an address the queue does not allowlist) is
+  logged as an ALERT, and the validator does not start.
+- The platform freezes a role's key past its ceilings (429 `operator_ceiling`, then 403 `operator_frozen`)
+  until CADmind's operator enables it again. The validator then stops that role, logs one ALERT, asks again every
+  5 minutes and resumes by itself; results waiting to be returned stay in its store. A frozen role never counts
+  against a miner.
+- 429 `too_many_in_flight` and 503 hold the role for the answer's `Retry-After`; the calls are retried on a later
+  tick.
 
 ## Scoring and weights
 

@@ -3,6 +3,7 @@ from the clients' signals, hourly weights and hourly reports.
 
     python -m cadmind_einstein.daemon --state-dir DIR --token-file T \\
         --platform https://cadmind.ai --operator-key-file K \\
+        [--mint-key-file M --queue-key-file Q] \\
         --wallet-name v --wallet-hotkey h --network test --netuid N [--dry-run-weights]
     # a local stack: a development key and a fixed metagraph (always a dry run)
     python -m cadmind_einstein.daemon --state-dir DIR --token-file T \\
@@ -37,6 +38,13 @@ only ``--second-opinion-coldkeys`` (2) distinct coldkeys end it declined or out 
 (``--genesis``, :func:`~.scoring.vector`): ``delivered`` (default), ``coldkey`` or ``hotkey``.
 Every answer on a miner's route is signed with the validator's hotkey.
 
+The platform's operator credential is split by role (:mod:`.platform`): ``--operator-key-file``
+(workspaces), ``--mint-key-file`` (miners' keys) and ``--queue-key-file`` (the job queue, which
+charges clients); each 0600, the last two falling back to the first. At startup the workspaces and
+queue keys are probed: a key that does not hold its role stops the daemon. A role the platform froze
+at its ceiling is stopped (ALERT in the log, re-checked every 5 minutes); results to return wait in
+the store meanwhile.
+
 The HTTP face listens on 127.0.0.1 by default; in production nginx stands in front (TLS, body
 size, header and body timeouts, ``limit_conn``/``limit_req``) and is named with
 ``--trusted-proxy`` so its ``X-Real-IP`` is what the per-address limits count.
@@ -62,11 +70,25 @@ from .chain import (
     dominance,
 )
 from .desk import AbusePolicy, Desk, SecondOpinion
-from .platform import OperatorClient
+from .platform import OperatorClient, PlatformError
 from .scoring import GENESIS, Ledger
 from .service import serve
 from .similarity import CopyPolicy, load_corpus
 from .store import Store
+
+
+def read_key(path: Path, *, strict: bool = True) -> str:
+    """A key file's secret. It must be readable by its owner only (0600): ``strict`` refuses one
+    that is not, otherwise it is logged."""
+    mode = path.stat().st_mode & 0o077
+    if mode:
+        if strict:
+            raise SystemExit(f"{path} is readable by others (mode {oct(mode)}): chmod 600 it")
+        _log(f"WARNING: {path} is readable by others (mode {oct(mode)}): chmod 600 it")
+    secret = path.read_text(encoding="utf-8").strip()
+    if not secret:
+        raise SystemExit(f"{path} is empty")
+    return secret
 
 
 def _log(line: str) -> None:
@@ -84,7 +106,16 @@ def main(argv: list[str] | None = None) -> int:
         "--queue-url", default="", help="the job queue's base URL (default: --platform)"
     )
     ap.add_argument(
-        "--operator-key-file", type=Path, required=True, help="the validator's agent key"
+        "--operator-key-file",
+        type=Path,
+        required=True,
+        help="the validator's operator (workspaces) agent key",
+    )
+    ap.add_argument(
+        "--mint-key-file", type=Path, help="the mint role's key (default: the operator key)"
+    )
+    ap.add_argument(
+        "--queue-key-file", type=Path, help="the queue role's key (default: the operator key)"
     )
     ap.add_argument("--wallet-name")
     ap.add_argument("--wallet-hotkey")
@@ -206,8 +237,26 @@ def main(argv: list[str] | None = None) -> int:
 
     store = Store(a.state_dir / "einstein.sqlite3")
     platform = OperatorClient(
-        a.platform, a.operator_key_file.read_text().strip(), queue_url=a.queue_url
+        a.platform,
+        read_key(a.operator_key_file, strict=False),
+        mint_key=read_key(a.mint_key_file) if a.mint_key_file else "",
+        queue_key=read_key(a.queue_key_file) if a.queue_key_file else "",
+        queue_url=a.queue_url,
+        log=_log,
     )
+    _log(
+        "operator keys: "
+        + ", ".join(
+            f"{role} {'own' if f else 'the operator key'}"
+            for role, f in (("mint", a.mint_key_file), ("queue", a.queue_key_file))
+        )
+    )
+    try:
+        roles = platform.probe()
+    except PlatformError as e:
+        _log(f"ALERT: an operator key does not hold its role -- not starting: {e} ({e.code})")
+        return 2
+    _log(f"operator roles at startup: {roles}")
     ledger = Ledger(report_dir=a.state_dir / "reports", hour_ms=a.hour_s * 1000, store=store)
     extra: dict[str, Any] = {}
     if a.admission_brief_file:
@@ -270,6 +319,7 @@ def main(argv: list[str] | None = None) -> int:
         dom = dominance(chain.state, me)
         dom["weights_mode"] = "dry-run" if dry else dom["weights"]
         dom["metagraph_failures"] = chain.failures
+        dom["frozen_roles"] = platform.frozen()
         return dom
 
     def say_dominance() -> None:

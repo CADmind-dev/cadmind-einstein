@@ -58,8 +58,12 @@ validator: freeze on submit, fork, read Watt's verdict (the gate), copy check, s
   (`cadmind_einstein/sealing.py`).
 - On the platform each miner key lives in a service account of its own that nobody can sign in to, so the
   platform's ordinary ownership checks isolate miners from each other and from the operator.
-- Only the validator's own agent key reaches the platform's *operator* routes: mint and disable keys, grant,
-  freeze and fork job workspaces. A deregistered or abusive hotkey's key is deleted.
+- Only the validator's own agent keys reach the platform's *operator* routes, one key per role so that no single
+  secret does everything: the mint key mints and disables miners' keys; the operator key grants, freezes and forks
+  job workspaces; the queue key claims and completes jobs (completing a delivered job charges the client). Past
+  its ceilings (mints, charges) the platform freezes that role's key until it is enabled again; the validator
+  stops that role, alerts, re-checks every 5 minutes, and keeps results to return in its store. A deregistered or
+  abusive hotkey's key is deleted.
 
 ## 3. Jobs: one miner each, client briefs only
 

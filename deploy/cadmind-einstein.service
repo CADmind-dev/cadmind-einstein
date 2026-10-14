@@ -1,5 +1,5 @@
 # The einstein validator as a systemd user unit (systemctl --user). Adjust the paths; keep the token
-# and the operator key files mode 0600. Remove --dry-run-weights only when the validator should
+# and the operator key files (operator, mint, queue) mode 0600. Remove --dry-run-weights only when the validator should
 # write weights and report commitments on chain.
 [Unit]
 Description=CADmind einstein validator
@@ -12,6 +12,8 @@ ExecStart=%h/cadmind-einstein/.venv/bin/cadmind-einstein \
   --token-file %h/.config/cadmind-einstein/desk.token \
   --platform https://cadmind.ai \
   --operator-key-file %h/.config/cadmind-einstein/operator.key \
+  --mint-key-file %h/.config/cadmind-einstein/mint.key \
+  --queue-key-file %h/.config/cadmind-einstein/queue.key \
   --wallet-name VALIDATOR_WALLET --wallet-hotkey VALIDATOR_HOTKEY_NAME \
   --network test --netuid NETUID \
   --trusted-proxy 127.0.0.1 \
