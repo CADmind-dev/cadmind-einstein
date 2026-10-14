@@ -5,7 +5,7 @@ All notable changes to this project are listed here. The format follows
 [Semantic Versioning](https://semver.org/). Each release's spec version (`10000*MAJOR + 100*MINOR + PATCH`) is the
 `version_key` the validator sets weights with.
 
-## [0.2.0] - unreleased (proposed)
+## [0.2.0] - 2026-10-14
 
 ### Added
 - Bittensor-style command-line flags on the validator and the reference miner: `--wallet.name`, `--wallet.hotkey`,
@@ -26,6 +26,9 @@ All notable changes to this project are listed here. The format follows
 - Log output goes through the standard `logging` module (bittensor 11 has no `bittensor.logging`), with the same line
   prefixes as before.
 - The weights' `version_key` is the validator's spec version rather than the subnet's current `weights_version`.
+
+### Fixed
+- A validator whose port is already taken now reports the bind error instead of an `AttributeError`.
 
 ### Compatibility
 - Every earlier flag still works: `--wallet-name`, `--wallet-hotkey` and `--network` are aliases of the new names.
