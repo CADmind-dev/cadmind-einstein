@@ -82,6 +82,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from typing import Any, Protocol
 
+from .answers import check as answers_check
 from .platform import PlatformError
 from .scoring import JobOutcome, Ledger, size_class
 from .sealing import seal
@@ -238,6 +239,9 @@ class Job:
     queued_ms: int = 0
     pending: list[JobOutcome] = field(default_factory=list)
     """failed attempts (rejections, gate failures) whose 0 counts only if another miner passes"""
+    no_questions: bool = False
+    """the client asked not to be asked questions (an API job always does): the builder decides
+    every would-be question itself, and the gate refuses a delivery with a client decision open"""
 
     @property
     def current(self) -> Attempt | None:
@@ -809,7 +813,21 @@ class Desk:
                 "accepted": bool(a.accepted_ms),
                 "accept_by_ms": a.accept_by_ms,
                 "deadline_ms": a.deadline_ms,
+                # the client asked not to be asked questions: decide them, leave none open
+                "no_questions": job.no_questions,
             }
+
+    def failures(self, hotkey: str, limit: int = 20) -> list[dict[str, Any]]:
+        """The miner's own recent attempts that did not pass, with why (its receipt shows them): a
+        gate failure says what the validator's gate found, e.g. a client answer left unrecorded."""
+        with self._lock:
+            rows = [
+                {"job": j.job, "kind": a.kind, "why": a.outcome[:1200], "at_ms": a.submitted_ms}
+                for j in self.jobs.values()
+                for a in j.attempts
+                if a.hotkey == hotkey and a.kind in ("gate", "timeout", "copy")
+            ]
+        return sorted(rows, key=lambda r: r["at_ms"])[-limit:]
 
     def accept(self, hotkey: str, job_id: str) -> dict[str, Any]:
         with self._mut():
@@ -1033,6 +1051,7 @@ class Desk:
                 exclude=exclude,
                 created_ms=self.now_ms(),
                 queued_ms=self.now_ms(),
+                no_questions=body.get("no_questions") is True,
             )
         return self.status(job_id)
 
@@ -1655,6 +1674,24 @@ class Desk:
             "digest": digest,
         }
 
+    @staticmethod
+    def _answers_gate(
+        job: Job, a: Attempt, verdict: dict[str, Any], export: bytes
+    ) -> dict[str, Any]:
+        """The client's answers, checked on the validator's own export of its fork
+        (:mod:`.answers`): every answer the platform wrote into the workspace's ``brief/`` before
+        the hand-over (the submit, or the deadline) is recorded in its decision, and a no-questions
+        job leaves no client decision open. Otherwise the attempt fails the gate, with the reason
+        the miner reads."""
+        why = answers_check(
+            export,
+            before_ms=a.submitted_ms or a.deadline_ms,
+            no_questions=job.no_questions,
+        )
+        if not why:
+            return verdict
+        return {**verdict, "deliverable": False, "stage": "answers", "error": why}
+
     def _judge_once(self, job: Job, a: Attempt) -> None:
         """Freeze, fork, gate the fork (:meth:`_gate`), copy-check, score. A platform that is
         unreachable or answers 5xx, our own key busy, or our guard run not ending on its own leaves
@@ -1673,6 +1710,8 @@ class Desk:
             verdict = self._gate(fork)
             if verdict["deliverable"]:
                 export = self.platform.export(fork)
+                if job.kind == "client":
+                    verdict = self._answers_gate(job, a, verdict, export)
         except _GateRetryError as e:
             with self._lock:
                 a.outcome = f"judging retried: {str(e)[:200]}"

@@ -8,7 +8,8 @@ the metagraph):
   the validator knows the miner is alive);
 - ``POST /v1/jobs/accept {job}``, ``POST /v1/jobs/submit {job, workspace, digest}``;
 - ``POST /v1/miners/admission`` -- its entry test, a job assigned to it alone;
-- ``POST /v1/miners/receipt`` -- its jobs, their scores, its weight and quality.
+- ``POST /v1/miners/receipt`` -- its jobs, their scores, its weight and quality, and its recent
+  attempts that did not pass with why (``failures``: a gate failure says what the gate found).
 
 The platform and the operator (Bearer): ``GET /v1/capacity`` (active and free admitted miners, the
 median job time: the platform's single queue computes positions and ETAs), ``POST /v1/cancel {job}``
@@ -573,6 +574,8 @@ def serve(
                                 "weight": weight.get(hk, 0.0),
                                 "quality": quality.get(hk, 0.0),
                                 "jobs": mine,
+                                # its recent attempts that did not pass, and why
+                                "failures": desk.failures(hk),
                             },
                         )
                     else:

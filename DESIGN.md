@@ -92,6 +92,18 @@ validator: freeze on submit, fork, read Watt's verdict (the gate), copy check, s
   are reused) and reads `watt status` again: the output passes only when that run passed and the record is that
   run's draw (`guard_draw.seed`). A miner whose own record is not deliverable fails at the first `status`, at no
   guard cost.
+- **The client's answers are part of the gate.** While a job is built, its client sees the builder's open client
+  decisions (`by = "client"`, `status = "open"`) as questions in their chat and may answer them, or ask for a
+  change; the platform writes each into the job workspace's `brief/` (the client's words, which the builder cannot
+  write) as the dated file Watt's own designer gets (`brief/answer-<date>-<decision>-<HHMMSS>.md`,
+  `brief/change-<date>-<HHMMSS>.md`), and the builder reads them with the platform's `client_answers` tool. On its
+  own export of the fork the validator then checks (`cadmind_einstein/answers.py`) that every answer that arrived
+  before the hand-over (the submit, or the deadline) is recorded in its decision: no longer open, an `answer.from`
+  quoting the file, the option the client picked as its choice. An answer that arrived after the hand-over never
+  counts against the miner (it starts the client's next round). A job whose client asked not to be asked questions
+  (`no_questions`; every job opened through the developer API) must leave no client decision open: each would-be
+  question is the builder's own decision (`by = "agent"`, `status = "decided"`), which the client sees as an
+  assumption. Either failure is a gate failure, with the reason in the miner's receipt.
 - **Any attempt that does not pass** -- a rejection, a gate failure, a timeout (not accepted within 2 minutes, or
   late and failing), a copy -- sends the job to **another miner, from scratch**: the brief (or the seed) only, never
   the failed project, and never an earlier miner's rejection message. Each miner decides on its own.
