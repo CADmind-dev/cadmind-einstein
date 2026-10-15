@@ -327,11 +327,11 @@ Every answer on these routes is signed by the validator's hotkey (`X-Einstein-Va
 |---|---|---|
 | `POST /v1/miners/agent_key` | `{x25519_public}` | `{key_id, sealed}`: the hotkey-bound agent key, sealed to that X25519 key (rate-limited) |
 | `POST /v1/miners/admission` | `{}` | the entry test: a job assigned to this miner alone (once a day) |
-| `POST /v1/jobs/work` | `{}` | `{job, workspace, brief, effort, accepted, accept_by_ms, deadline_ms}` or `{job: null}`; also the liveness poll |
+| `POST /v1/jobs/work` | `{}` | `{job, workspace, brief, effort, accepted, accept_by_ms, deadline_ms, no_questions}` or `{job: null}`; also the liveness poll |
 | `POST /v1/jobs/accept` | `{job}` | `{job, workspace, deadline_ms}` |
 | `POST /v1/jobs/submit` | `{job, workspace, digest}` | `{job, state: "judging"}` |
 | `POST /v1/jobs/reject` | `{job, category, message}` | `category`: `not-allowed` or `not-capable` |
-| `POST /v1/miners/receipt` | `{}` | the miner's recent jobs and scores, its weight and quality |
+| `POST /v1/miners/receipt` | `{}` | the miner's recent jobs and scores, its weight and quality, and its recent attempts that did not pass with why (`failures`) |
 
 ### Platform and operator routes (`Authorization: Bearer <desk token>`)
 
@@ -357,7 +357,7 @@ Every answer on these routes is signed by the validator's hotkey (`X-Einstein-Va
 With its mint key: `POST /api/agent/subnet/keys` (mint), `.../keys/disable`. With its operator key:
 `.../workspaces` (grant), `.../workspaces/{ws}` (state), `.../freeze`, `.../fork`, and in its own forks the
 ordinary agent routes (`/api/agent/workspaces/{ws}/run` for `watt status` and the gate's `watt test --mutate`,
-`/export`). With its queue key: `POST /api/engine/einstein/claim`, `lease`, `GET .../claimed`,
+`/export`, which the gate also reads for the client's answers: `cadmind_einstein/answers.py`). With its queue key: `POST /api/engine/einstein/claim`, `lease`, `GET .../claimed`,
 `POST .../jobs/{job}/result`. See `cadmind_einstein/platform.py`.
 
 - At startup the operator and queue keys are checked (the mint key on its first use); a key that does not hold

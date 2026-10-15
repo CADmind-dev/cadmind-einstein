@@ -135,6 +135,21 @@ class Mcp:
         return out
 
 
+def answers(mcp: Mcp, ws: str, after: int, log: Any) -> int:
+    """The client's new answers (the platform's ``client_answers``), logged; the next cursor. This
+    scripted miner rebuilds a fixed project and records none: a job its client answered fails the
+    gate, which is what an end-to-end test of the answers check wants. A platform without the tool
+    answers nothing new."""
+    try:
+        out = mcp.call("client_answers", workspace=ws, after=after)
+    except RuntimeError as e:
+        log(f"client_answers: {str(e)[:120]}")
+        return after
+    for a in out.get("answers") or []:
+        log(f"client {a.get('kind')}: {a.get('path')}")
+    return int(out.get("cursor") or after)
+
+
 def build(mcp: Mcp, ws: str, project: Path, log: Any) -> str:
     """Rebuild the reference project in the workspace; answer the digest Watt reports."""
     sources = tomllib.loads((project / "spec" / "sources.toml").read_text()).get("source", {})
@@ -154,9 +169,11 @@ def build(mcp: Mcp, ws: str, project: Path, log: Any) -> str:
             content=f.read_text(),
         )
     log(f"wrote {len(files)} files")
+    cursor = 0
     for command, args in (("check", {}), ("build", {}), ("test", {}), ("test", {"mutate": True})):
         out = mcp.watt(ws, command, **args)
         log(f"watt {command}{' --mutate' if args else ''}: {'ok' if out.get('ok') else 'errors'}")
+        cursor = answers(mcp, ws, cursor, log)
     status = mcp.watt(ws, "status")
     st = ((status.get("data") or {}).get("status")) or {}
     log(f"status: stage {st.get('stage')}, deliverable {st.get('deliverable')}")

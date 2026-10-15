@@ -74,7 +74,15 @@ class TestAgentArgv(unittest.TestCase):
         )
 
     def test_the_prompt_template_fills(self) -> None:
-        text = PROMPT.format(ws="w", job="j", brief="A {braced} brief", minutes=30, server="s")
+        text = PROMPT.format(
+            ws="w",
+            job="j",
+            brief="A {braced} brief",
+            minutes=30,
+            server="s",
+            questions="",
+            no_questions="no",
+        )
         self.assertIn("A {braced} brief", text)
         self.assertIn("DONE <digest>", text)
 

@@ -5,9 +5,21 @@ All notable changes to this project are listed here. The format follows
 [Semantic Versioning](https://semver.org/). Each release's spec version (`10000*MAJOR + 100*MINOR + PATCH`) is the
 `version_key` the validator sets weights with.
 
-## [Unreleased]
+## [0.3.0] - unreleased (proposed)
 
 ### Added
+- The client's answers: while a job is built its client sees the builder's open client decisions as questions and
+  may answer them (or ask for a change); the platform writes each into the job workspace's `brief/` as the dated
+  file Watt's own designer gets (`brief/answer-<date>-<decision>-<HHMMSS>.md`, `brief/change-<date>-<HHMMSS>.md`).
+  The validator's gate now checks, on its own export of its fork (`cadmind_einstein/answers.py`), that every answer
+  that arrived before the hand-over is recorded in its decision (not open, an `answer.from` quoting the file, the
+  option picked as its choice); an answer after the hand-over never counts against the miner.
+- No-questions jobs: a claim's `no_questions: true` (the client asked not to be asked; every developer-API job) is
+  on the miner's `work` answer, and the gate refuses such a delivery while a client decision is open.
+- The miner's receipt lists its recent attempts that did not pass, with why (`failures`).
+- The reference miner's prompt checks `client_answers` after each `watt` command, records each answer and re-runs
+  what it reaches, checks once more before it submits, and in a no-questions job decides every would-be question
+  itself (`{questions}` and `{no_questions}` in a `--prompt-file` template).
 - `fetch_to_workspace`, a local fetch tool for the reference miner's agent (`cadmind_einstein/fetch_mcp.py`, a stdio
   MCP server named `cadmind-fetch`, also `cadmind-einstein-fetch-mcp`): it downloads a source from the miner's own
   connection, which many sites answer when they refuse the platform's address, and uploads it into the job's
@@ -20,6 +32,11 @@ All notable changes to this project are listed here. The format follows
   remains), and asks for `fetched_by = "builder"` on the source records of what it stored.
 - The reference miner's prompt runs the full mutation guard only after a passing scoped guard that covers every
   must requirement, never as a first check.
+
+### Compatibility
+- Miners must check the client's answers (the platform's `client_answers` tool) and record them, and decide every
+  question in a no-questions job: a delivery that ignores an answer no longer passes the gate. Deploy the
+  platform's answer relay before this validator.
 
 ## [0.2.0] - 2026-10-14
 

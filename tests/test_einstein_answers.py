@@ -10,6 +10,7 @@ import time
 import unittest
 from typing import Any
 
+from cadmind_einstein.agent_miner import PROMPT, questions_rule
 from cadmind_einstein.answers import (
     check,
     decisions_of,
@@ -256,6 +257,29 @@ class TestDeskAnswers(unittest.TestCase):
         )  # only true is true
         _, w = self.assigned()
         self.assertIs(w["no_questions"], False)
+
+
+class TestMinerPrompt(unittest.TestCase):
+    def test_the_prompt_checks_answers_after_each_step_or_decides_them(self) -> None:
+        ask = PROMPT.format(
+            ws="ag-1",
+            job="j",
+            brief="b",
+            minutes=9,
+            server="s",
+            questions=questions_rule({}, "ag-1"),
+            no_questions="no",
+        )
+        self.assertIn("client_answers", ask)
+        self.assertIn("After each `watt` command", ask)
+        self.assertIn("ag-1", ask)
+        decide = questions_rule({"no_questions": True}, "ag-1")
+        self.assertIn("NOT to be asked questions", decide)
+        self.assertIn('by = "agent", status = "decided"', decide)
+        # an older template (no {questions}) still formats
+        old = "{ws} {job}"
+        extra = {"questions": "q", "no_questions": "no"}
+        self.assertEqual(old.format(ws="w", job="j", **extra), "w j")
 
 
 if __name__ == "__main__":

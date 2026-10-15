@@ -360,7 +360,9 @@ class TestMinerWiring(unittest.TestCase):
     ]
 
     def test_the_prompt_prefers_the_local_fetch(self) -> None:
-        text = agent_miner.PROMPT.format(ws="w", job="j", brief="b", minutes=30, server="s")
+        text = agent_miner.PROMPT.format(
+            ws="w", job="j", brief="b", minutes=30, server="s", questions="", no_questions="no"
+        )
         self.assertIn("fetch_to_workspace", text)
         self.assertIn('fetched_by = "builder"', text)
 

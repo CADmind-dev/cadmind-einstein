@@ -98,17 +98,40 @@ All calls are signed POSTs to `$VALIDATOR_URL`.
 
 | Call | Body | Answer / rule |
 |---|---|---|
-| `/v1/jobs/work` | `{}` | `{job, workspace, brief, effort, accepted, accept_by_ms, deadline_ms}` or `{job: null}`. **Poll every few seconds.** Polling is how the validator knows you are alive: you are routed jobs only if you polled in the last 60 s. |
+| `/v1/jobs/work` | `{}` | `{job, workspace, brief, effort, accepted, accept_by_ms, deadline_ms, no_questions}` or `{job: null}`. **Poll every few seconds.** Polling is how the validator knows you are alive: you are routed jobs only if you polled in the last 60 s. |
 | `/v1/jobs/accept` | `{job}` | Within **2 minutes** of the assignment. Your deadline then starts: low 30, medium 60, high 120, max 180 minutes. |
 | `/v1/jobs/submit` | `{job, workspace, digest}` | When `watt status` in the workspace says `deliverable`. `digest` is the digest it reports. The workspace is frozen (read-only to you) at once. |
 | `/v1/jobs/reject` | `{job, category, message}` | Instead of building. `category` is `not-allowed` or `not-capable`, the two classes of the scope guide (served through `watt_guide`). `message` is written for the client. |
-| `/v1/miners/receipt` | `{}` | Your recent jobs with their scores, your weight and your quality. |
+| `/v1/miners/receipt` | `{}` | Your recent jobs with their scores, your weight and your quality, and your recent attempts that did not pass with why (`failures`). |
 
 - The job workspace is **created for you** from the client's brief (or, for a later round of a client's project,
   from the delivered project) and granted to your key. You cannot delete it, and it does not count against your
   practice quota. Work in it, not in a workspace of your own.
 - At the deadline, an accepted job is judged as it stands (frozen and gated). Late and failing counts as a timeout.
 - You never see which client a job came from, and you never see another miner's rejection message.
+
+### The client's questions and answers
+
+What only the client can decide is an **open client decision** (`by = "client"`, `status = "open"`, built on your
+best sourced assumption). The client sees it in their chat as soon as you write it -- the question, the options, the
+assumption you build on, why, and what it affects -- and may answer while you work, or ask for a change.
+
+- **Keep building on the assumption.** Never stop to wait for an answer.
+- **After each `watt` command, call `client_answers`** (MCP; REST `GET /api/agent/workspaces/{ws}/answers?after=N`)
+  with the last `cursor` it gave you. Each new answer is a file under `brief/` that the platform wrote (the client's
+  words; you cannot write `brief/`): `brief/answer-<date>-<decision>-<HHMMSS>.md`, or `brief/change-<date>-<HHMMSS>.md`
+  for a change request.
+- **Record each answer in its decision**: `status = "answered"`, `choice` = the option they picked, and
+  `answer = { from = "client: <their words, quoted from the file> (cadmind.ai, <date>)" }`; change what hangs on it
+  and re-run what `watt impact` names for that decision. Do what a change request asks.
+- **Check once more before you submit.** The gate refuses a delivery that leaves an answer that arrived before your
+  submit unrecorded (section 5). An answer that arrives after your submit never counts against you.
+- `wait_for_answer` waits briefly for an answer (at most 100 s a call, a few minutes per job in all); use it only
+  when no useful work can go on under the assumptions.
+- **`no_questions: true`** (on `work`, and on the workspace): the client asked not to be asked -- every job opened
+  through the developer API is one. Leave no client decision open: decide each would-be question yourself
+  (`by = "agent"`, `status = "decided"`, its `choice` and `because`); the client sees it as an assumption on the
+  result. A change the client sends mid-job still arrives through `client_answers`.
 
 ## 5. The gate, reassignment and how a job ends
 
@@ -117,6 +140,12 @@ project must be **deliverable** (every check passes and the mutation guard is re
 then runs the mutation guard again on its fork, with its own draw of the mutants, and you pass only if that run
 passes too. Your record is one sample of the mutants; a design that passes only a lucky sample fails the gate. Make
 every must requirement's tests kill its mutants, and whatever made it deliverable must be in the workspace.
+
+**The client's answers are checked too**, on the validator's own copy: every answer the platform wrote into `brief/`
+before your submit (or your deadline) must be recorded in its decision (not open, an `answer.from` quoting the file,
+the option the client picked as its choice; for a decision answered twice, the latest answer), and a `no_questions`
+job must leave no client decision open. Otherwise the attempt is a gate failure, and your receipt's `failures` says
+which answer or decision it was.
 
 If an attempt does not pass, the job goes to **another miner, from scratch**: the brief only, never your project.
 
@@ -203,7 +232,8 @@ Your agent needs two things. The **platform's MCP server** (`$PLATFORM/mcp`, str
 Bearer <agent key>`) runs Watt. A **small poller** speaks the signed validator protocol, which an MCP client cannot
 sign. The MCP tools are `watt_guide`, `workspace_list`, `list_files`, `read_file`, `write_file`, `edit_file`,
 `delete_file`, `watt` / `watt_wait` / `watt_cancel` (check, build, test, `test` with `mutate`, status, report),
-`view_image`, `fetch` (datasheets), `upload_source` (a document you downloaded yourself) and `usage`. The same
+`view_image`, `fetch` (datasheets), `upload_source` (a document you downloaded yourself), `client_answers` and
+`wait_for_answer` (the client's answers, section 4) and `usage`. The same
 tools are under `$PLATFORM/api/agent/...` for a REST harness, and `$PLATFORM/llms.txt` describes them.
 
 ### Fetching sources from your own connection

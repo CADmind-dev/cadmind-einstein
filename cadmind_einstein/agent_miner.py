@@ -23,7 +23,11 @@ allow automated or commercial use.
 Placeholders in ``--agent-command``: ``{prompt_file}``, ``{mcp_config}`` (a standard
 ``mcpServers`` JSON file naming the ``cadmind-watt`` server and the local ``cadmind-fetch`` server,
 mode 0600), ``{model}``,
-``{workspace}`` and ``{job}``. The agent's last line must be ``DONE <digest>`` or
+``{workspace}`` and ``{job}``. A ``--prompt-file`` template takes ``{ws}``, ``{job}``, ``{brief}``,
+``{minutes}``, ``{server}``, ``{questions}`` (the rule for the client's questions and answers: check
+``client_answers`` after each ``watt`` step, record each answer in its decision -- or, when the
+client asked not to be asked questions, decide every one) and ``{no_questions}`` (``yes``/``no``).
+The agent's last line must be ``DONE <digest>`` or
 ``REJECT <not-allowed|not-capable>: <message for the client>``.
 
 The agent also gets one local tool, ``fetch_to_workspace`` (:mod:`.fetch_mcp`, a stdio MCP server
@@ -91,13 +95,14 @@ sketch needs, then build.
 with mutate once at the end (`watt_wait`), only after a passing scoped guard (mutate with several \
 `only`, one run) covering every must requirement, never as a first check.
 3. Self-review: load paths, retention, clearances, every clause tested; fix the weakest points.
-Never weaken a test to pass. What only the client can decide is an open decision, designed around \
-your best sourced assumption.
+Never weaken a test to pass. {questions}
 A `watt` run far longer than usual: stop it with `watt_cancel` and change the design.
 
 If the scope guide says we may not or cannot build it, end with exactly one line:
 REJECT <not-allowed|not-capable>: <message for the client>
-Otherwise work until `watt` status says deliverable, then end with exactly one line:
+Otherwise work until `watt` status says deliverable and `client_answers` has nothing new (an \
+answer that came is recorded first, and the design made deliverable again), then end with exactly \
+one line:
 DONE <digest>
 (the digest `watt` status reports). You have about {minutes} minutes.
 
@@ -105,6 +110,34 @@ Job: {job}
 Brief:
 {brief}
 """
+
+
+QUESTIONS = """What only the client can decide is an open client decision (by = "client", \
+status = "open"), designed around your best sourced assumption: the client sees it in their chat \
+and may answer while you work. Keep building on the assumption; never wait for an answer. After \
+each `watt` command, call `client_answers` (workspace `{ws}`, `after` = the last `cursor` it \
+gave): each new answer is a file under brief/ (the client's words). Record it in its decision \
+(status = "answered", choice = the option they picked, answer = { from = "client: <their words, \
+quoted from that file> (cadmind.ai, <date>)" }), change what hangs on it, and re-run what \
+`watt impact` names for that decision. A change request (brief/change-*.md) is the client's too: \
+do what it asks. The validator refuses a delivery that leaves an answer unrecorded. Use \
+`wait_for_answer` only when no useful work can go on under the assumptions (it waits briefly). \
+If `client_answers` says `no_questions: true`, the client asked not to be asked: decide every \
+would-be question yourself instead (by = "agent", status = "decided", choice, because)."""
+
+NO_QUESTIONS = """The client asked NOT to be asked questions: leave no client decision open. \
+Decide every would-be question yourself as an agent decision (by = "agent", status = "decided", \
+choice = the option you build on, because = why), so the client sees it as an assumption on the \
+result. \
+The validator refuses a delivery with an open client decision. Still call `client_answers` after \
+each `watt` command: a change the client sends mid-job arrives there (brief/change-*.md)."""
+
+
+def questions_rule(work: dict[str, Any], ws: str) -> str:
+    """What the prompt says of the client's questions and answers: ask and keep building (and check
+    for answers after each step), or, when the client asked not to be asked (``no_questions``),
+    decide."""
+    return (NO_QUESTIONS if work.get("no_questions") else QUESTIONS).replace("{ws}", ws)
 
 
 def _write_private(path: Path, data: str) -> None:
@@ -293,7 +326,15 @@ def main(argv: list[str] | None = None) -> int:
             code, work = call("/v1/jobs/work", {})  # the deadline starts at accept
         deadline_ms = int(work.get("deadline_ms") or 0) if isinstance(work, dict) else 0
         minutes = max(10, int((deadline_ms / 1000 - time.time()) / 60) - 3) if deadline_ms else 25
-        prompt = template.format(ws=ws, job=job, brief=brief, minutes=minutes, server=MCP_SERVER)
+        prompt = template.format(
+            ws=ws,
+            job=job,
+            brief=brief,
+            minutes=minutes,
+            server=MCP_SERVER,
+            questions=questions_rule(work if isinstance(work, dict) else {}, ws),
+            no_questions="yes" if isinstance(work, dict) and work.get("no_questions") else "no",
+        )
         prompt_file = a.state / "prompt.txt"
         _write_private(prompt_file, prompt)
         cmd = agent_argv(
