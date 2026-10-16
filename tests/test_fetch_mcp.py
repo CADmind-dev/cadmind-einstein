@@ -10,6 +10,7 @@ import base64
 import io
 import json
 import socket
+import tempfile
 import threading
 import time
 import unittest
@@ -20,12 +21,14 @@ from unittest import mock
 
 from cadmind_einstein import agent_miner
 from cadmind_einstein.fetch_mcp import (
+    TIME_TOOL,
     TOOL,
     FetchError,
     Server,
     download,
     public_address,
     server_config,
+    time_left,
 )
 
 PDF = b"%PDF-1.7\n" + b"datasheet " * 100
@@ -289,7 +292,7 @@ class TestTheTool(unittest.TestCase):
             [m["id"] for m in out], [1, 2, 3, 4, 5]
         )  # the notification is not answered
         self.assertEqual(out[0]["result"]["protocolVersion"], "2025-06-18")
-        self.assertEqual([t["name"] for t in out[1]["result"]["tools"]], [TOOL])
+        self.assertEqual([t["name"] for t in out[1]["result"]["tools"]], [TOOL, TIME_TOOL])
         self.assertEqual(out[3]["error"]["code"], -32601)
         self.assertEqual(out[4]["error"]["code"], -32602)
 
@@ -332,7 +335,10 @@ class TestMinerWiring(unittest.TestCase):
             job="j",
         )
         allowed = argv[argv.index("--allowedTools") + 1]
-        self.assertEqual(allowed, "mcp__cadmind-watt,mcp__cadmind-fetch__fetch_to_workspace")
+        self.assertEqual(
+            allowed,
+            "mcp__cadmind-watt,mcp__cadmind-fetch__fetch_to_workspace,mcp__cadmind-fetch__time_left",
+        )
         self.assertIn("--strict-mcp-config", argv)
         argv = agent_miner.agent_argv(
             self.ns(local_fetch=False),
@@ -361,7 +367,14 @@ class TestMinerWiring(unittest.TestCase):
 
     def test_the_prompt_prefers_the_local_fetch(self) -> None:
         text = agent_miner.PROMPT.format(
-            ws="w", job="j", brief="b", minutes=30, server="s", questions="", no_questions="no"
+            ws="w",
+            job="j",
+            brief="b",
+            minutes=30,
+            deadline_utc="12:00",
+            server="s",
+            questions="",
+            no_questions="no",
         )
         self.assertIn("fetch_to_workspace", text)
         self.assertIn('fetched_by = "builder"', text)
@@ -404,3 +417,37 @@ class TestTheProgram(unittest.TestCase):
         out = [json.loads(line) for line in proc.stdout.splitlines()]
         self.assertEqual(out[0]["result"]["serverInfo"]["name"], "cadmind-fetch")
         self.assertEqual(out[1]["result"]["tools"][0]["name"], TOOL)
+
+
+class TimeLeftTests(unittest.TestCase):
+    """A model cannot feel time pass: one handed over half-done (2026-10-16)."""
+
+    def test_time_left_reads_the_deadline_the_miner_wrote(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / "deadline"
+            f.write_text(str(1_000_000 * 1000 + 25 * 60 * 1000 + 30_000))
+            out = time_left(f, now=1_000_000.0)
+            self.assertEqual(out["minutes_left"], 25)
+            self.assertFalse(out["past_deadline"])
+            self.assertTrue(time_left(f, now=1_000_000.0 + 3600)["past_deadline"])
+            f.write_text("")
+            self.assertIsNone(time_left(f)["deadline"])
+            self.assertIsNone(time_left(None)["deadline"])
+
+    def test_the_server_answers_time_left_and_the_config_passes_the_file(self) -> None:
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / "deadline"
+            f.write_text(str(int((time.time() + 600) * 1000)))
+            server = Server("https://p", "k", deadline_file=f)
+            out = server.handle(
+                {
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "tools/call",
+                    "params": {"name": TIME_TOOL, "arguments": {}},
+                }
+            )
+            body = json.loads(out["result"]["content"][0]["text"])
+            self.assertIn(body["minutes_left"], (9, 10))
+        args = server_config("https://p", Path("/k"), Path("/s/deadline"))["args"]
+        self.assertEqual(args[-2:], ["--deadline-file", "/s/deadline"])

@@ -39,7 +39,7 @@ class TestAgentArgv(unittest.TestCase):
         # the Watt MCP server's tools and the one local fetch tool (tests/test_fetch_mcp.py)
         self.assertEqual(
             argv[argv.index("--allowedTools") + 1],
-            "mcp__cadmind-watt,mcp__cadmind-fetch__fetch_to_workspace",
+            "mcp__cadmind-watt,mcp__cadmind-fetch__fetch_to_workspace,mcp__cadmind-fetch__time_left",
         )
         self.assertNotIn("--model", argv)
 
@@ -79,11 +79,14 @@ class TestAgentArgv(unittest.TestCase):
             job="j",
             brief="A {braced} brief",
             minutes=30,
+            deadline_utc="12:00",
             server="s",
             questions="",
             no_questions="no",
         )
         self.assertIn("A {braced} brief", text)
+        self.assertIn("until 12:00 UTC", text)
+        self.assertIn("time_left", text)
         self.assertIn("DONE <digest>", text)
 
 

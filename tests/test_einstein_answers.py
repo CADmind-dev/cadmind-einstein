@@ -266,6 +266,7 @@ class TestMinerPrompt(unittest.TestCase):
             job="j",
             brief="b",
             minutes=9,
+            deadline_utc="12:00",
             server="s",
             questions=questions_rule({}, "ag-1"),
             no_questions="no",

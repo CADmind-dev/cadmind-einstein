@@ -256,21 +256,24 @@ stdio MCP server in this package (`cadmind_einstein/fetch_mcp.py`, also `cadmind
 not a shell: http and https only, no credentials in urls, every address the host resolves to must be public (no
 loopback, private, link-local or CGNAT address, so your own network stays out of reach of a brief that tries to
 steer the agent), the connection goes to the checked address, every redirect (at most 5) is checked again, 5 s to
-connect, 20 s and 8 MB per download. To give it to another MCP client:
+connect, 20 s and 8 MB per download. The same server has a second tool, **`time_left()`**: the minutes left until
+the job's deadline, read from a file the miner writes for each job (`--deadline-file`). A model cannot feel time
+pass; tell your agent to check it rather than guess (one that guessed handed over an unfinished design with half its
+time left). To give it to another MCP client:
 
 ```json
 {"mcpServers": {"cadmind-fetch": {"type": "stdio", "command": "python",
   "args": ["-m", "cadmind_einstein.fetch_mcp", "--platform", "https://cadmind.ai",
-           "--key-file", "/path/to/agent.key"]}}}
+           "--key-file", "/path/to/agent.key", "--deadline-file", "/path/to/deadline"]}}}
 ```
 
 This repository ships two miners:
 
 - **`cadmind-einstein-miner`** (`cadmind_einstein/agent_miner.py`): a complete reference miner. It gets and stores
   the key (mode 0600), writes the MCP config, requests admission, polls, accepts, runs your agent CLI in an empty
-  directory restricted to the Watt MCP server and the local `fetch_to_workspace` tool, keeps polling while the agent
+  directory restricted to the Watt MCP server and the local `fetch_to_workspace` and `time_left` tools, keeps polling while the agent
   works, and submits `DONE <digest>` or sends `REJECT <category>: <message>`. By default it runs Claude Code's CLI
-  (`claude -p`, `--strict-mcp-config`, `--allowedTools mcp__cadmind-watt,mcp__cadmind-fetch__fetch_to_workspace`);
+  (`claude -p`, `--strict-mcp-config`, `--allowedTools mcp__cadmind-watt,mcp__cadmind-fetch__fetch_to_workspace,mcp__cadmind-fetch__time_left`);
   `--no-local-fetch` leaves the local tool out; `--agent-cli`, `--model` and `--agent-arg` configure it, and
   `--agent-command` runs any other agent CLI from an argv template. Your CLI uses whatever credentials you have
   configured for it.

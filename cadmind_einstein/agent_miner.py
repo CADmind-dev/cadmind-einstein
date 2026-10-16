@@ -24,7 +24,8 @@ Placeholders in ``--agent-command``: ``{prompt_file}``, ``{mcp_config}`` (a stan
 ``mcpServers`` JSON file naming the ``cadmind-watt`` server and the local ``cadmind-fetch`` server,
 mode 0600), ``{model}``,
 ``{workspace}`` and ``{job}``. A ``--prompt-file`` template takes ``{ws}``, ``{job}``, ``{brief}``,
-``{minutes}``, ``{server}``, ``{questions}`` (the rule for the client's questions and answers: check
+``{minutes}``, ``{deadline_utc}``, ``{server}``, ``{questions}`` (the rule for the client's
+questions and answers: check
 ``client_answers`` after each ``watt`` step, record each answer in its decision -- or, when the
 client asked not to be asked questions, decide every one) and ``{no_questions}`` (``yes``/``no``).
 The agent's last line must be ``DONE <digest>`` or
@@ -71,6 +72,7 @@ from .cli import (
 )
 from .fake_miner import signed
 from .fetch_mcp import SERVER_NAME as FETCH_SERVER
+from .fetch_mcp import TIME_TOOL
 from .fetch_mcp import TOOL as FETCH_TOOL
 from .fetch_mcp import server_config as fetch_server_config
 from .sealing import new_keypair, open_sealed
@@ -104,7 +106,9 @@ Otherwise work until `watt` status says deliverable and `client_answers` has not
 answer that came is recorded first, and the design made deliverable again), then end with exactly \
 one line:
 DONE <digest>
-(the digest `watt` status reports). You have about {minutes} minutes.
+(the digest `watt` status reports). You have about {minutes} minutes, until {deadline_utc} \
+UTC. You cannot feel time pass: check it with `time_left` (never guess it), and never stop \
+or hand over early because you think time is up.
 
 Job: {job}
 Brief:
@@ -184,7 +188,14 @@ def allowed_tools(a: argparse.Namespace) -> str:
     tools = [f"mcp__{MCP_SERVER}"]
     if getattr(a, "local_fetch", True):
         tools.append(f"mcp__{FETCH_SERVER}__{FETCH_TOOL}")
+        tools.append(f"mcp__{FETCH_SERVER}__{TIME_TOOL}")
     return ",".join(tools)
+
+
+def deadline_file(a: argparse.Namespace) -> Path | None:
+    """Where the miner writes each job's deadline (epoch ms) for the local `time_left` tool."""
+    state = getattr(a, "state", None)
+    return Path(state) / "deadline" if state else None
 
 
 def mcp_config(a: argparse.Namespace, key: str, key_file: Path) -> dict[str, Any]:
@@ -199,7 +210,10 @@ def mcp_config(a: argparse.Namespace, key: str, key_file: Path) -> dict[str, Any
     }
     if getattr(a, "local_fetch", True):
         # absolute: the agent (and so the server) runs in the empty work directory
-        servers[FETCH_SERVER] = fetch_server_config(a.platform.rstrip("/"), key_file.resolve())
+        deadline = deadline_file(a)
+        servers[FETCH_SERVER] = fetch_server_config(
+            a.platform.rstrip("/"), key_file.resolve(), deadline.resolve() if deadline else None
+        )
     return {"mcpServers": servers}
 
 
@@ -326,11 +340,21 @@ def main(argv: list[str] | None = None) -> int:
             code, work = call("/v1/jobs/work", {})  # the deadline starts at accept
         deadline_ms = int(work.get("deadline_ms") or 0) if isinstance(work, dict) else 0
         minutes = max(10, int((deadline_ms / 1000 - time.time()) / 60) - 3) if deadline_ms else 25
+        # the job's own deadline for `time_left` (none written: it says no deadline is set)
+        deadline = deadline_file(a)
+        if deadline is not None:
+            _write_private(deadline, str(deadline_ms) if deadline_ms else "")
+        deadline_utc = (
+            time.strftime("%H:%M", time.gmtime(deadline_ms / 1000))
+            if deadline_ms
+            else "the job's deadline"
+        )
         prompt = template.format(
             ws=ws,
             job=job,
             brief=brief,
             minutes=minutes,
+            deadline_utc=deadline_utc,
             server=MCP_SERVER,
             questions=questions_rule(work if isinstance(work, dict) else {}, ws),
             no_questions="yes" if isinstance(work, dict) and work.get("no_questions") else "no",

@@ -47,6 +47,10 @@ from . import __version__
 
 SERVER_NAME = "cadmind-fetch"
 TOOL = "fetch_to_workspace"
+TIME_TOOL = "time_left"
+"""The job's time left, read from the deadline the miner writes for each job
+(``--deadline-file``): a model cannot feel time pass, and one that guessed handed over an
+unfinished design with half its time left (2026-10-16)."""
 MAX_BYTES = 8_000_000
 """The platform's document cap (the hosted fetch's): larger is refused before it is uploaded."""
 CONNECT_S = 5.0
@@ -260,6 +264,36 @@ TOOL_SCHEMA: dict[str, Any] = {
 }
 
 
+TIME_SCHEMA: dict[str, Any] = {
+    "name": TIME_TOOL,
+    "description": (
+        "How much time this job has left, from its deadline: minutes left and the deadline "
+        "(UTC). You cannot feel time pass: call this whenever you judge how much time you have, "
+        "and never stop or hand over early because you think time is up."
+    ),
+    "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+    "annotations": {"readOnlyHint": True, "destructiveHint": False, "openWorldHint": False},
+}
+
+
+def time_left(deadline_file: Path | None, now: float | None = None) -> dict[str, Any]:
+    """The job's time left, from the deadline (epoch ms) the miner wrote; none if it wrote none."""
+    try:
+        deadline_ms = int(
+            (deadline_file.read_text(encoding="utf-8") if deadline_file else "").strip() or 0
+        )
+    except (OSError, ValueError):
+        deadline_ms = 0
+    if not deadline_ms:
+        return {"deadline": None, "note": "no deadline is set for this job"}
+    left_s = deadline_ms / 1000 - (time.time() if now is None else now)
+    return {
+        "minutes_left": max(0, int(left_s // 60)),
+        "deadline_utc": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(deadline_ms / 1000)),
+        "past_deadline": left_s < 0,
+    }
+
+
 class Server:
     """One stdio session: JSON-RPC 2.0 messages, one per line."""
 
@@ -273,8 +307,10 @@ class Server:
         timeout_s: float = TIMEOUT_S,
         max_bytes: int = MAX_BYTES,
         user_agent: str = USER_AGENT,
+        deadline_file: Path | None = None,
     ) -> None:
         self.platform, self.key = platform, key
+        self.deadline_file = deadline_file
         self.fences: dict[str, Any] = {
             "resolver": resolver,
             "connect_s": connect_s,
@@ -313,10 +349,18 @@ class Server:
         if method == "ping":
             return _result(ident, {})
         if method == "tools/list":
-            return _result(ident, {"tools": [TOOL_SCHEMA]})
+            return _result(ident, {"tools": [TOOL_SCHEMA, TIME_SCHEMA]})
         if method == "tools/call":
+            if isinstance(params, dict) and params.get("name") == TIME_TOOL:
+                return _result(
+                    ident, {"content": [_text(json.dumps(time_left(self.deadline_file)))]}
+                )
             if not isinstance(params, dict) or params.get("name") != TOOL:
-                return _error(ident, -32602, f"no tool {params.get('name')!r}; the tool is {TOOL}")
+                return _error(
+                    ident,
+                    -32602,
+                    f"no tool {params.get('name')!r}; the tools are {TOOL} and {TIME_TOOL}",
+                )
             args = params.get("arguments") or {}
             try:
                 out = self.fetch_to_workspace(args if isinstance(args, dict) else {})
@@ -354,8 +398,12 @@ def _error(ident: Any, code: int, message: str) -> dict[str, Any]:
     return {"jsonrpc": "2.0", "id": ident, "error": {"code": code, "message": message}}
 
 
-def server_config(platform: str, key_file: Path) -> dict[str, Any]:
-    """This server as an ``mcpServers`` entry (stdio): the same Python that runs the miner."""
+def server_config(
+    platform: str, key_file: Path, deadline_file: Path | None = None
+) -> dict[str, Any]:
+    """This server as an ``mcpServers`` entry (stdio): the same Python that runs the miner.
+    ``deadline_file``: where the miner writes each job's deadline (epoch ms) for `time_left`."""
+    extra = ["--deadline-file", str(deadline_file)] if deadline_file else []
     return {
         "type": "stdio",
         "command": sys.executable,
@@ -366,6 +414,7 @@ def server_config(platform: str, key_file: Path) -> dict[str, Any]:
             platform,
             "--key-file",
             str(key_file),
+            *extra,
         ],
     }
 
@@ -379,6 +428,12 @@ def parser() -> argparse.ArgumentParser:
     ap.add_argument("--connect-s", type=float, default=CONNECT_S, help="seconds to connect")
     ap.add_argument("--timeout-s", type=float, default=TIMEOUT_S, help="seconds for a download")
     ap.add_argument("--user-agent", default=USER_AGENT, help="the User-Agent the download sends")
+    ap.add_argument(
+        "--deadline-file",
+        type=Path,
+        default=None,
+        help="where the miner writes the job's deadline (epoch ms)",
+    )
     return ap
 
 
@@ -397,6 +452,7 @@ def main(argv: list[str] | None = None) -> int:
         connect_s=a.connect_s,
         timeout_s=a.timeout_s,
         user_agent=a.user_agent,
+        deadline_file=a.deadline_file,
     ).serve(sys.stdin, sys.stdout)
     return 0
 
