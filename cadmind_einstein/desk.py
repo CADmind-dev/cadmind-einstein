@@ -1623,6 +1623,8 @@ class Desk:
            draw on either side: its guard is the full one, in a fixed order, which no re-roll
            changes.) The validator's draw of a digest is the same on every run, so a design
            delivered before and submitted unchanged draws as it did then.
+        4. ``watt report`` on the fork: the delivery's files are made from the judged design, never
+           carried over from an earlier round's copy.
 
         Raises :class:`_GateRetryError` (and lets :class:`PlatformError` through) on our side.
         """
@@ -1666,6 +1668,25 @@ class Desk:
             verdict["error"] = (
                 "the guard record is not the validator's own run "
                 f"(digest {after.get('digest')}, draw {recorded}, the validator's {drawn})"
+            )
+            return verdict
+        # 4. ``watt report`` on the fork: the delivery's files (3D view, parts list, print and STEP
+        #    files, instructions) are made by the validator from the design it just judged. A
+        #    revision starts from a copy of the last delivery, ``build/`` included, and a miner that
+        #    never re-ran the report handed over the earlier version's files (2026-10-16).
+        made = self.platform.run(fork, "report", {}, budget_s=GATE_RUN_S)
+        state, stopped = made.get("state"), str(made.get("stopped") or "")
+        if state == "running":
+            raise _GateRetryError(
+                f"the validator's report run {made.get('run', '')} is still going"
+            )
+        if state != "done" or stopped in ("cancelled", "frozen"):
+            why = stopped or str(made.get("error") or state)
+            raise _GateRetryError(f"the validator's report run did not end on its own: {why[:200]}")
+        if not made.get("ok"):
+            verdict["stage"] = "report"
+            verdict["error"] = (
+                "the delivery's files could not be made from this design (watt report refused it)"
             )
             return verdict
         return {

@@ -131,6 +131,7 @@ class FakePlatform:
             deliverable=src["deliverable"],
             weak=src.get("weak", False),
             draw=src.get("draw", ""),
+            report_fails=src.get("report_fails", False),
             hotkey="validator",
         )
 
@@ -152,6 +153,10 @@ class FakePlatform:
             w.update(deliverable=True, draw="sha256:validator")
             guard = {"digest": digest, "sampled": {"seed": "sha256:validator"}, "survivors": []}
             return {"state": "done", "ok": True, "data": {"guard": guard}}
+        if command == "report":
+            # the delivery's files, made by the validator from the judged design
+            w["reported"] = True
+            return {"state": "done", "ok": not w.get("report_fails"), "data": {"files": []}}
         stage = "deliverable" if w["deliverable"] else "check"
         draw = {"sampled": [3, 9], "seed": w.get("draw") or "sha256:miner"}
         return {
@@ -695,11 +700,24 @@ class TestGateDraw(unittest.TestCase):
         self.assertEqual(self.gate_runs(ws), ["status", "test"])  # the miner's own record said yes
         self.assertTrue(self.p.ws[ws]["deliverable"])  # ... and the miner's workspace still does
 
+    def test_the_validator_makes_the_delivery_files_and_refuses_a_design_it_cannot_report(
+        self,
+    ) -> None:
+        """The files the client gets are made by the validator from the judged design (2026-10-16: a
+        revision handed over the earlier version's files, copied with its workspace)."""
+        _, ws = self.submit("r3", weak=False)
+        self.p.ws[ws]["report_fails"] = True  # the fork copies it
+        st = wait_state(self.desk, "r3", ("queued", "done"))
+        self.assertEqual(st["state"], "queued")
+        a = self.desk.jobs["r3"].attempts[0]
+        self.assertIn("files could not be made", a.outcome)
+        self.assertNotIn("r3", self.p.completed)
+
     def test_a_sound_design_passes_on_the_validators_own_draw(self) -> None:
         hk, ws = self.submit("r2", weak=False)
         st = wait_state(self.desk, "r2", ("done",))
         self.assertEqual((st["result"]["label"], st["result"]["hotkey"]), ("delivered", hk))
-        self.assertEqual(self.gate_runs(ws), ["status", "test", "status"])
+        self.assertEqual(self.gate_runs(ws), ["status", "test", "status", "report"])
         fork = self.desk.jobs["r2"].attempts[0].fork
         self.assertEqual(st["result"]["workspace"], fork)
         self.assertEqual(self.p.ws[fork]["draw"], "sha256:validator")  # the record is ours
