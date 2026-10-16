@@ -97,7 +97,10 @@ sketch needs, then build.
 `report` with mutate (the full guard and the delivery's files in one run; `watt_wait` on it), \
 only after a passing scoped guard (mutate with several `only`, one run) covering every must \
 requirement, never as a first check.
-3. Self-review: load paths, retention, clearances, every clause tested; fix the weakest points.
+3. Give each bought hardware record a `price` (`"4.87 USD"`; a cable stock `"0.80 USD/m"`; a \
+material `"25 USD/kg"`): DigiKey's qty-1 USD price from `lookup_part`, cited to its saved source, \
+or a listing you fetched; never a guess -- leave it out when unknown. The client sees the bill.
+4. Self-review: load paths, retention, clearances, every clause tested; fix the weakest points.
 Never weaken a test to pass. {questions}
 A `watt` run far longer than usual: stop it with `watt_cancel` and change the design.
 
