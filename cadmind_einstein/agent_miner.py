@@ -93,9 +93,10 @@ datasheet or manual over retailer listings. Fetch maker pages and datasheets wit
 sites that block the hosted `fetch` answer; its source records add fetched_by = "builder"); the \
 hosted `fetch` remains available. A site that blocks both: move on. Fetch only what the first \
 sketch needs, then build.
-2. Iterate with check / build / test; edit files, never rewrite them whole; run the full `test` \
-with mutate once at the end (`watt_wait`), only after a passing scoped guard (mutate with several \
-`only`, one run) covering every must requirement, never as a first check.
+2. Iterate with check / build / test; edit files, never rewrite them whole; end with ONE \
+`report` with mutate (the full guard and the delivery's files in one run; `watt_wait` on it), \
+only after a passing scoped guard (mutate with several `only`, one run) covering every must \
+requirement, never as a first check.
 3. Self-review: load paths, retention, clearances, every clause tested; fix the weakest points.
 Never weaken a test to pass. {questions}
 A `watt` run far longer than usual: stop it with `watt_cancel` and change the design.

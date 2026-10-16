@@ -142,7 +142,7 @@ class FakePlatform:
         w = self.ws[ws]
         self.runs.append((ws, command))
         digest = str(abs(hash(json.dumps(w["files"], sort_keys=True))))
-        if command == "test" and (args or {}).get("mutate"):
+        if command in ("test", "report") and (args or {}).get("mutate"):
             if w.get("weak"):
                 guard = {
                     "digest": digest,
@@ -150,13 +150,12 @@ class FakePlatform:
                     "survivors": [{"label": "drop hook", "requirements": ["holds"]}],
                 }
                 return {"state": "done", "ok": False, "data": {"guard": guard}}
+            if w.get("report_fails"):  # the guard passes but the delivery's files cannot be made
+                guard = {"digest": digest, "sampled": {"seed": "sha256:validator"}, "survivors": []}
+                return {"state": "done", "ok": False, "data": {"guard": guard}}
             w.update(deliverable=True, draw="sha256:validator")
             guard = {"digest": digest, "sampled": {"seed": "sha256:validator"}, "survivors": []}
             return {"state": "done", "ok": True, "data": {"guard": guard}}
-        if command == "report":
-            # the delivery's files, made by the validator from the judged design
-            w["reported"] = True
-            return {"state": "done", "ok": not w.get("report_fails"), "data": {"files": []}}
         stage = "deliverable" if w["deliverable"] else "check"
         draw = {"sampled": [3, 9], "seed": w.get("draw") or "sha256:miner"}
         return {
@@ -697,7 +696,9 @@ class TestGateDraw(unittest.TestCase):
         self.assertIn("unguarded R.holds", a.outcome)
         self.assertNotIn("r1", self.p.completed)
         self.assertEqual(self.ledger.outcomes, [])  # held, as any gate failure
-        self.assertEqual(self.gate_runs(ws), ["status", "test"])  # the miner's own record said yes
+        self.assertEqual(
+            self.gate_runs(ws), ["status", "report"]
+        )  # the miner's own record said yes
         self.assertTrue(self.p.ws[ws]["deliverable"])  # ... and the miner's workspace still does
 
     def test_the_validator_makes_the_delivery_files_and_refuses_a_design_it_cannot_report(
@@ -710,14 +711,14 @@ class TestGateDraw(unittest.TestCase):
         st = wait_state(self.desk, "r3", ("queued", "done"))
         self.assertEqual(st["state"], "queued")
         a = self.desk.jobs["r3"].attempts[0]
-        self.assertIn("files could not be made", a.outcome)
+        self.assertIn("did not pass", a.outcome)
         self.assertNotIn("r3", self.p.completed)
 
     def test_a_sound_design_passes_on_the_validators_own_draw(self) -> None:
         hk, ws = self.submit("r2", weak=False)
         st = wait_state(self.desk, "r2", ("done",))
         self.assertEqual((st["result"]["label"], st["result"]["hotkey"]), ("delivered", hk))
-        self.assertEqual(self.gate_runs(ws), ["status", "test", "status", "report"])
+        self.assertEqual(self.gate_runs(ws), ["status", "report", "status"])
         fork = self.desk.jobs["r2"].attempts[0].fork
         self.assertEqual(st["result"]["workspace"], fork)
         self.assertEqual(self.p.ws[fork]["draw"], "sha256:validator")  # the record is ours
@@ -728,7 +729,7 @@ class TestGateDraw(unittest.TestCase):
         real = self.p.run
 
         def stale(ws: str, command: str, args: Any = None, **kw: Any) -> dict[str, Any]:
-            if command == "test":  # a run that says it passed, but the record is not its draw
+            if command == "report":  # a run that says it passed, but the record is not its draw
                 self.p.runs.append((ws, command))
                 guard = {
                     "digest": real(ws, "status")["data"]["status"]["digest"],
@@ -749,13 +750,13 @@ class TestGateDraw(unittest.TestCase):
         self.assertEqual(self.gate_runs(ws), ["status"])  # bounded: nothing heavy for a no
 
     def test_a_guard_run_that_does_not_end_is_retried_on_the_same_fork(self) -> None:
-        real, calls = self.p.run, {"test": 0}
+        real, calls = self.p.run, {"report": 0}
 
         def slow_once(ws: str, command: str, args: Any = None, **kw: Any) -> dict[str, Any]:
-            if command == "test":
-                calls["test"] += 1
+            if command == "report":
+                calls["report"] += 1
                 self.assertEqual(kw.get("budget_s"), GATE_RUN_S)
-                if calls["test"] == 1:
+                if calls["report"] == 1:
                     return {"state": "running", "run": "run-1"}
             return real(ws, command, args, **kw)
 
@@ -773,7 +774,7 @@ class TestGateDraw(unittest.TestCase):
         real = self.p.run
 
         def wall(ws: str, command: str, args: Any = None, **kw: Any) -> dict[str, Any]:
-            if command == "test":
+            if command == "report":
                 return {"state": "done", "ok": False, "stopped": "wall", "data": None}
             return real(ws, command, args, **kw)
 
